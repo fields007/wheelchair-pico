@@ -192,7 +192,7 @@ def read_speed_mode():
 
     elif p7 == 0 and p4 == 1:
 
-        speed_mode = "NORMAL"
+        speed_mode = "MEDIUM"
 
     elif p7 == 1 and p4 == 0:
 
@@ -268,7 +268,7 @@ MIN_MOTOR_VOLTAGE = 1.60
 
 SPEED_MAX_VOLTAGE = {
     "TERRAIN": 1.90,
-    "NORMAL": 2.20,
+    "MEDIUM": 2.20,
     "ROAD": 3.30,
 }
 
@@ -554,7 +554,7 @@ SERVO_RELEASE_DELAY_MS = 500
 
 STEERING_STEP_US = {
     "TERRAIN": 8,
-    "NORMAL": 4,
+    "MEDIUM": 4,
     "ROAD": 2,
 }
 
