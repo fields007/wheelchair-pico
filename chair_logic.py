@@ -176,7 +176,7 @@ speed_gp7 = Pin(
     Pin.PULL_UP
 )
 
-speed_mode = "SLOW"
+speed_mode = "TERRAIN"
 
 
 def read_speed_mode():
@@ -188,7 +188,7 @@ def read_speed_mode():
 
     if p7 == 1 and p4 == 1:
 
-        speed_mode = "SLOW"
+        speed_mode = "TERRAIN"
 
     elif p7 == 0 and p4 == 1:
 
@@ -267,7 +267,7 @@ def read_displayed_speed():
 MIN_MOTOR_VOLTAGE = 1.60
 
 SPEED_MAX_VOLTAGE = {
-    "SLOW": 1.90,
+    "TERRAIN": 1.90,
     "MEDIUM": 2.20,
     "ROAD": 3.30,
 }
@@ -553,7 +553,7 @@ SERVO_RIGHT = 1900
 SERVO_RELEASE_DELAY_MS = 500
 
 STEERING_STEP_US = {
-    "SLOW": 8,
+    "TERRAIN": 8,
     "MEDIUM": 4,
     "ROAD": 2,
 }
