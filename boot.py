@@ -1,5 +1,5 @@
-"""Minimal boot script.
+"""Early Pico 2 W initialization."""
 
-Important startup/update logic lives in main.py so that boot.py
-can remain stable and rarely needs to be changed.
-"""
+import rp2
+
+rp2.country("CZ")
