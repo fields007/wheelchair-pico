@@ -196,7 +196,7 @@ def read_speed_mode():
 
     elif p7 == 1 and p4 == 0:
 
-        speed_mode = "HIGH"
+        speed_mode = "ROAD"
 
     # p4 == 0 and p7 == 0 is invalid.
     # In that case retain the previous valid mode.
@@ -269,7 +269,7 @@ MIN_MOTOR_VOLTAGE = 1.60
 SPEED_MAX_VOLTAGE = {
     "SLOW": 1.90,
     "MEDIUM": 2.20,
-    "HIGH": 3.30,
+    "ROAD": 3.30,
 }
 
 THROTTLE_EXPONENT = 2.0
@@ -555,7 +555,7 @@ SERVO_RELEASE_DELAY_MS = 500
 STEERING_STEP_US = {
     "SLOW": 8,
     "MEDIUM": 4,
-    "HIGH": 2,
+    "ROAD": 2,
 }
 
 servo_current_us = SERVO_CENTER

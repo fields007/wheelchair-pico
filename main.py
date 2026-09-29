@@ -64,7 +64,7 @@ through MQTT.
 Local USB / REPL chair diagnostics continue regardless.
 
 Important supervisor event messages are still sent remotely
-even when telemetry is disabled.
+during normal connected operation.
 
 Remote telemetry defaults to ON after every reboot.
 
@@ -75,13 +75,21 @@ Normal chair diagnostics:
 - latest message queued for MQTT when remote telemetry is ON
 - NOT continuously written to flash
 
-Important supervisor events:
+Normal important supervisor events:
 - printed over USB / REPL
 - written to maintenance.log
 - queued for MQTT
 
-This avoids writing joystick telemetry to flash five times per
-second.
+Update / rollback progress:
+- printed over USB / REPL
+- written to maintenance.log
+- NOT queued for MQTT
+
+This is deliberate because update/rollback is followed by a
+reboot and queued MQTT messages cannot be guaranteed to be sent.
+
+After the reboot and successful automatic reconnection, a new
+confirmation message is sent remotely.
 
 RECOVERY
 --------
@@ -119,25 +127,23 @@ import system.updater as updater
 
 LOG_FILE = "maintenance.log"
 
-# One-shot flag used to request automatic network reconnection
+# One-shot file used to request automatic network reconnection
 # after a remotely requested reset.
+#
+# Its contents describe why the reset occurred:
+#
+#     reboot
+#     update
+#     rollback
+#
 RECONNECT_FILE = "reconnect_after_reboot.flag"
 
-# How often MQTT is checked while the chair is running.
 MQTT_SERVICE_INTERVAL_MS = 200
 
-# Only the latest unsent telemetry message is retained.
 pending_telemetry = None
 
-# Whether continuous chair telemetry is sent remotely.
-#
-# This affects MQTT telemetry only.
-# Local USB / REPL diagnostics always continue.
-#
-# Deliberately defaults to True after every reboot.
 remote_telemetry_enabled = True
 
-# Supervisor event messages are small and infrequent.
 EVENT_QUEUE_LIMIT = 20
 pending_events = []
 
@@ -233,10 +239,14 @@ def write_event_to_file(message):
 # RECONNECT-AFTER-REBOOT FLAG
 # ============================================================
 
-def request_reconnect_after_reboot():
+def request_reconnect_after_reboot(reason):
     """
-    Create the one-shot flag that asks the next boot to
-    automatically connect to Wi-Fi and MQTT.
+    Ask the next boot to reconnect automatically.
+
+    reason should normally be:
+        reboot
+        update
+        rollback
     """
 
     try:
@@ -247,14 +257,14 @@ def request_reconnect_after_reboot():
         ) as file:
 
             file.write(
-                "1"
+                str(reason)
             )
 
         return True
 
     except Exception as error:
 
-        event_log(
+        local_event_log(
             "Could not create reconnect flag: {}".format(
                 error
             )
@@ -265,28 +275,32 @@ def request_reconnect_after_reboot():
 
 def take_reconnect_after_reboot():
     """
-    Check for and consume the one-shot reconnect flag.
+    Read and consume the one-shot reconnect flag.
 
-    Returns True if the flag existed.
+    Returns:
+        None
+            if there is no automatic reconnect request
 
-    The flag is deleted immediately so that a later unrelated
-    reboot does not cause another automatic connection attempt.
+        string
+            reboot / update / rollback
+
+    The file is removed before networking is attempted so the
+    request cannot accidentally repeat on later boots.
     """
 
     try:
 
-        os.stat(
-            RECONNECT_FILE
-        )
+        with open(
+            RECONNECT_FILE,
+            "r"
+        ) as file:
+
+            reason = file.read().strip()
 
     except OSError:
 
-        return False
+        return None
 
-    # The flag exists.
-    #
-    # Delete it before attempting any networking so the request
-    # remains genuinely one-shot.
     try:
 
         os.remove(
@@ -295,18 +309,31 @@ def take_reconnect_after_reboot():
 
     except Exception as error:
 
-        event_log(
+        local_event_log(
             "Could not remove reconnect flag: {}".format(
                 error
             )
         )
 
-        # Do not automatically connect if we could not consume
-        # the flag. Otherwise every reboot could repeatedly
-        # trigger an automatic connection.
-        return False
+        # Do not automatically reconnect if the one-shot flag
+        # could not be consumed.
+        return None
 
-    return True
+    if reason not in (
+        "reboot",
+        "update",
+        "rollback"
+    ):
+
+        # Compatibility with the previous version, which wrote
+        # "1" into the flag.
+        if reason == "1":
+
+            return "reboot"
+
+        return "reboot"
+
+    return reason
 
 
 # ============================================================
@@ -321,7 +348,6 @@ def queue_event(message):
 
     if len(pending_events) >= EVENT_QUEUE_LIMIT:
 
-        # Remove oldest event.
         pending_events.pop(0)
 
     pending_events.append(
@@ -333,15 +359,53 @@ def queue_telemetry(message):
 
     global pending_telemetry
 
-    # Deliberately overwrite any older unsent telemetry.
     pending_telemetry = str(
         message
     )
 
 
+def clear_mqtt_queues():
+    """
+    Discard messages that were queued while MQTT was offline.
+
+    This is particularly useful after an automatic reboot:
+    boot and connection messages printed before MQTT existed
+    should not later appear remotely as though they were live.
+    """
+
+    global pending_events
+    global pending_telemetry
+
+    pending_events = []
+    pending_telemetry = None
+
+
 # ============================================================
 # LOGGING
 # ============================================================
+
+def local_event_log(message=""):
+    """
+    Important local event.
+
+    Printed over USB / REPL and stored in maintenance.log.
+
+    It is deliberately NOT queued for MQTT.
+
+    Used for operations such as update/rollback where a reboot
+    is imminent and MQTT delivery cannot be guaranteed.
+    """
+
+    message = str(message)
+
+    print(
+        message
+    )
+
+    write_event_to_file(
+        message
+    )
+
 
 def event_log(message=""):
     """
@@ -398,20 +462,12 @@ def chair_log(message=""):
 # ============================================================
 
 def handle_logs_off():
-    """
-    Disable continuous chair telemetry over MQTT.
-
-    Local USB / REPL diagnostics and important supervisor
-    events continue normally.
-    """
 
     global remote_telemetry_enabled
     global pending_telemetry
 
     remote_telemetry_enabled = False
 
-    # Discard any diagnostic waiting to be transmitted so that
-    # no old telemetry appears after logs-off.
     pending_telemetry = None
 
     event_log(
@@ -420,9 +476,6 @@ def handle_logs_off():
 
 
 def handle_logs_on():
-    """
-    Enable continuous chair telemetry over MQTT.
-    """
 
     global remote_telemetry_enabled
 
@@ -485,11 +538,6 @@ def connection_failed_pattern():
 # ============================================================
 
 def check_connection_button():
-    """
-    Check GP9.
-
-    Returns True once per physical button press.
-    """
 
     global connection_requested
 
@@ -503,7 +551,6 @@ def check_connection_button():
     if connection_requested:
         return False
 
-    # Short debounce.
     sleep_ms(20)
 
     if connection_button.value() != 0:
@@ -534,11 +581,6 @@ def wait_for_button_release():
 # ============================================================
 
 def mqtt_command_received(command_text):
-    """
-    Called by mqtt_manager when a command arrives.
-
-    The command manager only validates and queues it.
-    """
 
     command_manager.receive(
         command_text,
@@ -556,11 +598,6 @@ mqtt_manager.set_command_callback(
 # ============================================================
 
 def flush_one_mqtt_message():
-    """
-    Send at most one queued MQTT message.
-
-    Important events have priority over telemetry.
-    """
 
     global pending_telemetry
 
@@ -614,16 +651,46 @@ def flush_one_mqtt_message():
     return False
 
 
+def send_remote_now(message):
+    """
+    Attempt to send one message immediately over MQTT.
+
+    This is used only when MQTT is already known to be
+    connected, for example after a successful automatic
+    post-reboot reconnect.
+
+    The message is still printed and stored locally.
+    """
+
+    message = str(message)
+
+    print(
+        message
+    )
+
+    write_event_to_file(
+        message
+    )
+
+    if not mqtt_manager.is_connected():
+        return False
+
+    try:
+
+        return mqtt_manager.send_log(
+            message
+        )
+
+    except Exception:
+
+        return False
+
+
 # ============================================================
 # NETWORK SERVICE WHILE DRIVING
 # ============================================================
 
 def service_mqtt_if_due():
-    """
-    Periodically poll MQTT and send one queued log message.
-
-    Returns quickly when MQTT is not connected.
-    """
 
     global last_mqtt_service_ms
 
@@ -641,7 +708,6 @@ def service_mqtt_if_due():
     if not mqtt_manager.is_connected():
         return
 
-    # Check for incoming command.
     try:
 
         mqtt_manager.check_messages()
@@ -649,7 +715,6 @@ def service_mqtt_if_due():
     except Exception:
         return
 
-    # Send at most one outgoing message.
     flush_one_mqtt_message()
 
 
@@ -658,22 +723,13 @@ def service_mqtt_if_due():
 # ============================================================
 
 def supervisor_service():
-    """
-    Called by chair_logic once per 20 ms control-loop iteration.
 
-    Returns True when chair_logic should stop and return to
-    main.py.
-    """
-
-    # GP9 always requests a stop so networking can be attempted.
     if check_connection_button():
 
         return True
 
-    # Periodic MQTT servicing.
     service_mqtt_if_due()
 
-    # See whether a remote command is waiting.
     command = command_manager.pending_command()
 
     if command is None:
@@ -697,21 +753,6 @@ def supervisor_service():
 def connect_network(
     wait_for_release=True
 ):
-    """
-    Attempt Wi-Fi and then MQTT.
-
-    Chair outputs must already be stopped before this function
-    is called.
-
-    GP2:
-        solid while connecting
-        5 quick flashes = Wi-Fi + MQTT success
-        3 slow flashes = failure
-
-    wait_for_release should be True for a GP9-triggered
-    connection and False for an automatic post-reboot
-    connection.
-    """
 
     event_log("")
     event_log(
@@ -728,7 +769,7 @@ def connect_network(
         "Wheelchair outputs temporarily disabled."
     )
 
-    # Solid LED during connection attempt.
+    # Solid GP2 while connecting.
     led.value(1)
 
     wifi_ok = False
@@ -777,7 +818,7 @@ def connect_network(
             mqtt_ok = False
 
     # --------------------------------------------------------
-    # RESULT
+    # RESULT / LED
     # --------------------------------------------------------
 
     if wifi_ok and mqtt_ok:
@@ -786,6 +827,7 @@ def connect_network(
             "Remote logging and commands connected."
         )
 
+        # Five quick flashes.
         connection_success_pattern()
 
     else:
@@ -794,12 +836,9 @@ def connect_network(
             "Remote connection unavailable."
         )
 
+        # Three slow flashes.
         connection_failed_pattern()
 
-    # A physical GP9 request waits until GP9 has been released.
-    #
-    # An automatic post-reboot connection has no button press
-    # to wait for.
     if wait_for_release:
 
         wait_for_button_release()
@@ -829,7 +868,6 @@ def report_status():
         "=============================="
     )
 
-    # Software version
     try:
 
         version = updater.current_version()
@@ -844,7 +882,6 @@ def report_status():
         )
     )
 
-    # Wi-Fi
     try:
 
         wifi_connected = (
@@ -887,7 +924,6 @@ def report_status():
         except Exception:
             pass
 
-    # MQTT
     try:
 
         mqtt_connected = (
@@ -906,7 +942,6 @@ def report_status():
         )
     )
 
-    # Remote chair telemetry
     event_log(
         "Remote telemetry: {}".format(
             "ON"
@@ -915,7 +950,6 @@ def report_status():
         )
     )
 
-    # Supervisor mode
     event_log(
         "Mode: {}".format(
             "RECOVERY"
@@ -1020,7 +1054,6 @@ def handle_add_wifi(command):
             password
         )
 
-        # Never log the password.
         event_log(
             "Saved Wi-Fi network: {}".format(
                 ssid
@@ -1043,23 +1076,30 @@ def handle_add_wifi(command):
 
 def handle_update():
 
-    event_log("")
-    event_log(
+    # From this point onward, update progress is local only.
+    #
+    # We do not queue a series of MQTT messages immediately
+    # before deliberately rebooting the Pico.
+
+    local_event_log("")
+    local_event_log(
         "Software update requested."
     )
 
-    event_log(
+    local_event_log(
         "Wheelchair outputs are disabled."
     )
 
     try:
 
         installed = updater.update(
-            log=event_log
+            log=local_event_log
         )
 
     except Exception as error:
 
+        # The update failed, so the Pico is NOT rebooting.
+        # Report the failure remotely as a real normal event.
         event_log(
             "Update failed: {}".format(
                 error
@@ -1076,19 +1116,18 @@ def handle_update():
 
         return
 
-    event_log(
+    local_event_log(
         "Update installed successfully."
     )
 
-    # Ask the next boot to reconnect automatically.
-    request_reconnect_after_reboot()
-
-    event_log(
-        "Rebooting."
+    request_reconnect_after_reboot(
+        "update"
     )
 
-    # Do not perform a potentially blocking MQTT publish here.
-    # Once the update is installed, reboot promptly.
+    local_event_log(
+        "Rebooting after update."
+    )
+
     sleep_ms(500)
 
     machine.reset()
@@ -1100,19 +1139,19 @@ def handle_update():
 
 def handle_rollback():
 
-    event_log("")
-    event_log(
+    local_event_log("")
+    local_event_log(
         "Rollback requested."
     )
 
-    event_log(
+    local_event_log(
         "Wheelchair outputs are disabled."
     )
 
     try:
 
         restored = updater.rollback(
-            log=event_log
+            log=local_event_log
         )
 
     except Exception as error:
@@ -1133,15 +1172,16 @@ def handle_rollback():
 
         return
 
-    event_log(
+    local_event_log(
         "Rollback completed successfully."
     )
 
-    # Ask the next boot to reconnect automatically.
-    request_reconnect_after_reboot()
+    request_reconnect_after_reboot(
+        "rollback"
+    )
 
-    event_log(
-        "Rebooting."
+    local_event_log(
+        "Rebooting after rollback."
     )
 
     sleep_ms(500)
@@ -1155,19 +1195,20 @@ def handle_rollback():
 
 def handle_reboot():
 
-    event_log("")
-    event_log(
+    local_event_log("")
+    local_event_log(
         "Reboot requested."
     )
 
-    event_log(
+    local_event_log(
         "Wheelchair outputs are disabled."
     )
 
-    # Ask the next boot to reconnect automatically.
-    request_reconnect_after_reboot()
+    request_reconnect_after_reboot(
+        "reboot"
+    )
 
-    event_log(
+    local_event_log(
         "Rebooting."
     )
 
@@ -1181,12 +1222,6 @@ def handle_reboot():
 # ============================================================
 
 def process_pending_command():
-    """
-    Remove and process one queued command.
-
-    Called only after chair control has returned to main.py or
-    from recovery mode.
-    """
 
     command = command_manager.take_command()
 
@@ -1197,13 +1232,31 @@ def process_pending_command():
         "command"
     )
 
-    event_log(
-        "Processing command: {}".format(
-            command_manager.describe(
-                command
+    # For commands that immediately lead to a reboot, don't
+    # create another MQTT event that may never be delivered.
+    if command_name in (
+        command_manager.COMMAND_UPDATE,
+        command_manager.COMMAND_ROLLBACK,
+        command_manager.COMMAND_REBOOT
+    ):
+
+        local_event_log(
+            "Processing command: {}".format(
+                command_manager.describe(
+                    command
+                )
             )
         )
-    )
+
+    else:
+
+        event_log(
+            "Processing command: {}".format(
+                command_manager.describe(
+                    command
+                )
+            )
+        )
 
     if command_name == command_manager.COMMAND_STATUS:
 
@@ -1251,15 +1304,6 @@ def process_pending_command():
 # ============================================================
 
 def load_chair_logic():
-    """
-    Import chair_logic.
-
-    Import is deliberately performed here rather than at the
-    top of main.py.
-
-    This allows main.py to remain alive if a remotely installed
-    chair_logic.py is broken.
-    """
 
     global chair_logic
     global recovery_mode
@@ -1310,12 +1354,6 @@ def load_chair_logic():
 # ============================================================
 
 def stop_chair_outputs():
-    """
-    Best-effort output stop.
-
-    If chair_logic imported correctly, use its normal
-    stop_outputs() function.
-    """
 
     if chair_logic is None:
         return
@@ -1337,23 +1375,93 @@ def stop_chair_outputs():
 # AUTOMATIC POST-REBOOT CONNECTION
 # ============================================================
 
-def automatic_reconnect():
+def report_post_reboot_success(reason):
+    """
+    Send a truthful confirmation after MQTT has actually
+    reconnected.
+
+    These messages are transmitted immediately rather than
+    merely placed in the normal queue.
+    """
+
+    if reason == "update":
+
+        send_remote_now(
+            "Reconnected after software update."
+        )
+
+        try:
+
+            version = updater.current_version()
+
+        except Exception:
+
+            version = "unknown"
+
+        send_remote_now(
+            "Installed version: {}".format(
+                version
+            )
+        )
+
+    elif reason == "rollback":
+
+        send_remote_now(
+            "Reconnected after rollback."
+        )
+
+        try:
+
+            version = updater.current_version()
+
+        except Exception:
+
+            version = "unknown"
+
+        send_remote_now(
+            "Installed version: {}".format(
+                version
+            )
+        )
+
+    elif reason == "reboot":
+
+        send_remote_now(
+            "Reconnected after remote reboot."
+        )
+
+
+def automatic_reconnect(reason):
     """
     Perform the one-shot automatic network connection requested
     by a remote reboot/update/rollback.
-
-    The reconnect flag has already been deleted before this
-    function is called.
     """
 
-    event_log("")
-    event_log(
-        "Automatic network reconnect requested after reboot."
+    local_event_log("")
+    local_event_log(
+        "Automatic network reconnect requested after {}.".format(
+            reason
+        )
     )
 
-    connect_network(
+    connected = connect_network(
         wait_for_release=False
     )
+
+    if connected:
+
+        # Discard messages that were generated while MQTT was
+        # unavailable. They were local boot/connection events,
+        # not messages that were actually delivered remotely.
+        clear_mqtt_queues()
+
+        # Now send a fresh message over the connection that
+        # actually exists.
+        report_post_reboot_success(
+            reason
+        )
+
+    return connected
 
 
 # ============================================================
@@ -1361,41 +1469,33 @@ def automatic_reconnect():
 # ============================================================
 
 def recovery_loop(
-    auto_reconnect=False
+    auto_reconnect_reason=None
 ):
-    """
-    Recovery supervisor.
-
-    No chair control is run here.
-
-    GP9 can establish Wi-Fi/MQTT.
-
-    If auto_reconnect is True, one automatic connection attempt
-    is made before entering the recovery loop.
-    """
 
     global last_mqtt_service_ms
 
     led.value(0)
 
-    event_log("")
-    event_log(
+    local_event_log("")
+    local_event_log(
         "=============================="
     )
-    event_log(
+    local_event_log(
         "RECOVERY MODE"
     )
-    event_log(
+    local_event_log(
         "=============================="
     )
 
-    event_log(
+    local_event_log(
         "Wheelchair control is disabled."
     )
 
-    if auto_reconnect:
+    if auto_reconnect_reason is not None:
 
-        automatic_reconnect()
+        automatic_reconnect(
+            auto_reconnect_reason
+        )
 
     event_log(
         "Press GP9 to connect to the network."
@@ -1458,17 +1558,14 @@ def recovery_loop(
 
 start_log()
 
-event_log(
+local_event_log(
     "Starting wheelchair supervisor."
 )
 
 led.value(0)
 
-# Consume the one-shot flag immediately during boot.
-#
-# This tells us whether this boot followed a remotely requested
-# reboot/update/rollback.
-auto_reconnect_requested = (
+# Consume the one-shot reconnect reason immediately.
+auto_reconnect_reason = (
     take_reconnect_after_reboot()
 )
 
@@ -1486,18 +1583,21 @@ try:
     if not load_chair_logic():
 
         recovery_loop(
-            auto_reconnect=auto_reconnect_requested
+            auto_reconnect_reason=auto_reconnect_reason
         )
 
     # --------------------------------------------------------
     # AUTOMATIC POST-REBOOT NETWORK CONNECTION
     # --------------------------------------------------------
 
-    if auto_reconnect_requested:
+    if auto_reconnect_reason is not None:
 
         # chair_logic has loaded, but chair control has not yet
-        # started, so outputs remain stopped during networking.
-        automatic_reconnect()
+        # started. Outputs therefore remain stopped while
+        # networking is established.
+        automatic_reconnect(
+            auto_reconnect_reason
+        )
 
     # --------------------------------------------------------
     # NORMAL OPERATION
@@ -1581,10 +1681,8 @@ try:
 
             process_pending_command()
 
-            # update / rollback / reboot normally reset the Pico.
-            #
-            # Other commands return here and normal chair
-            # control resumes.
+            # update / rollback / reboot normally reset the
+            # Pico. Other commands return here.
 
             event_log(
                 "Resuming wheelchair control."
@@ -1592,7 +1690,6 @@ try:
 
             continue
 
-        # This normally should not happen.
         event_log(
             "Chair control returned without a pending request."
         )
@@ -1608,12 +1705,12 @@ except KeyboardInterrupt:
 
     led.value(0)
 
-    event_log("")
-    event_log(
+    local_event_log("")
+    local_event_log(
         "KeyboardInterrupt."
     )
 
-    event_log(
+    local_event_log(
         "Wheelchair control stopped."
     )
 
@@ -1628,8 +1725,8 @@ except Exception as error:
 
     led.value(0)
 
-    event_log("")
-    event_log(
+    local_event_log("")
+    local_event_log(
         "SUPERVISOR ERROR: {}".format(
             error
         )
