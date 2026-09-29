@@ -15,13 +15,26 @@ where stop_requested() returns True when chair control should stop.
 Inputs:
 - steering joystick: GP27 / ADC1
 - throttle joystick: GP28 / ADC2
-- speed selector: GP4 and GP7
-- speed input: GP20 and GP21
+- mode selector: GP4 and GP7
+- speed selector: GP20 and GP21
 
 Outputs:
 - steering servo: GP10
 - motor-controller PWM:
-  GP17, GP18, GP14, GP15
+    BR: GP17
+    BL: GP18
+    FR: GP14
+    FL: GP15
+
+Modes:
+- TERRAIN
+- SNOW
+- ROAD
+
+Speeds:
+- 1
+- 2
+- 3
 
 The status LED and network/maintenance button are handled
 by main.py.
@@ -161,51 +174,51 @@ def get_y_percentage(y):
 
 
 # ============================================================
-# SPEED SELECTOR
+# MODE SELECTOR
 # ============================================================
 
-speed_gp4 = Pin(
+mode_gp4 = Pin(
     4,
     Pin.IN,
     Pin.PULL_UP
 )
 
-speed_gp7 = Pin(
+mode_gp7 = Pin(
     7,
     Pin.IN,
     Pin.PULL_UP
 )
 
-speed_mode = "TERRAIN"
+current_mode = "TERRAIN"
 
 
-def read_speed_mode():
+def read_mode():
 
-    global speed_mode
+    global current_mode
 
-    p4 = speed_gp4.value()
-    p7 = speed_gp7.value()
+    p4 = mode_gp4.value()
+    p7 = mode_gp7.value()
 
     if p7 == 1 and p4 == 1:
 
-        speed_mode = "TERRAIN"
+        current_mode = "TERRAIN"
 
     elif p7 == 0 and p4 == 1:
 
-        speed_mode = "MEDIUM"
+        current_mode = "SNOW"
 
     elif p7 == 1 and p4 == 0:
 
-        speed_mode = "ROAD"
+        current_mode = "ROAD"
 
     # p4 == 0 and p7 == 0 is invalid.
-    # In that case retain the previous valid mode.
+    # Retain the previous valid mode.
 
-    return speed_mode
+    return current_mode
 
 
 # ============================================================
-# SPEED INPUT
+# SPEED SELECTOR
 # ============================================================
 
 # Three-position speed input:
@@ -232,32 +245,32 @@ speed_gp21 = Pin(
     Pin.PULL_UP
 )
 
-displayed_speed = 2
+current_speed = 2
 
 
-def read_displayed_speed():
+def read_speed():
 
-    global displayed_speed
+    global current_speed
 
     p20 = speed_gp20.value()
     p21 = speed_gp21.value()
 
     if p20 == 0 and p21 == 1:
 
-        displayed_speed = 3
+        current_speed = 3
 
     elif p20 == 1 and p21 == 1:
 
-        displayed_speed = 2
+        current_speed = 2
 
     elif p20 == 1 and p21 == 0:
 
-        displayed_speed = 1
+        current_speed = 1
 
     # p20 == 0 and p21 == 0 is invalid.
-    # Retain the previous valid value.
+    # Retain the previous valid speed.
 
-    return displayed_speed
+    return current_speed
 
 
 # ============================================================
@@ -266,10 +279,32 @@ def read_displayed_speed():
 
 MIN_MOTOR_VOLTAGE = 1.60
 
-SPEED_MAX_VOLTAGE = {
-    "TERRAIN": 1.90,
-    "MEDIUM": 2.20,
-    "ROAD": 3.30,
+# ROAD mode reproduces the three maximum voltages that were
+# previously selected by TERRAIN / MEDIUM / ROAD.
+ROAD_MAX_VOLTAGE = {
+    1: 1.90,
+    2: 2.20,
+    3: 3.30,
+}
+
+# SNOW is intentionally left without special behaviour for now.
+# Until its behaviour is defined, it uses the normal ROAD
+# speed mapping.
+SNOW_MAX_VOLTAGE = {
+    1: 1.90,
+    2: 2.20,
+    3: 3.30,
+}
+
+# In TERRAIN mode the front wheels always have the same
+# maximum voltage, regardless of selected speed.
+TERRAIN_FRONT_MAX_VOLTAGE = 1.80
+
+# Rear-wheel command multiplier in TERRAIN mode.
+TERRAIN_REAR_MULTIPLIER = {
+    1: 1.00,
+    2: 1.15,
+    3: 1.30,
 }
 
 THROTTLE_EXPONENT = 2.0
@@ -284,7 +319,10 @@ MOTOR_MAX_SLEW_STEP_V = 0.010
 MOTOR_START_SLEW_STEP_V = 0.0005
 MOTOR_SLEW_ACCELERATION_V = 0.00005
 
+# This is the base/front motor voltage.
+# In TERRAIN mode the rear voltage can be derived from this.
 motor_current_v = 0.0
+
 motor_accel_step_v = MOTOR_START_SLEW_STEP_V
 
 
@@ -295,6 +333,7 @@ motor_accel_step_v = MOTOR_START_SLEW_STEP_V
 PICO_PWM_VOLTAGE = 3.3
 MOTOR_PWM_FREQUENCY = 20000
 
+# Explicit physical wheel positions.
 motor_BR = PWM(
     Pin(17)
 )
@@ -309,6 +348,16 @@ motor_FR = PWM(
 
 motor_FL = PWM(
     Pin(15)
+)
+
+REAR_MOTOR_PWMS = (
+    motor_BR,
+    motor_BL,
+)
+
+FRONT_MOTOR_PWMS = (
+    motor_FR,
+    motor_FL,
 )
 
 MOTOR_PWMS = (
@@ -346,20 +395,57 @@ def voltage_to_duty(voltage):
     )
 
 
-def set_motor_voltage(voltage):
+def set_motor_voltages(
+    front_voltage,
+    rear_voltage
+):
 
-    if voltage < MIN_MOTOR_VOLTAGE:
-        voltage = 0.0
+    # Preserve the original behaviour:
+    # commands below MIN_MOTOR_VOLTAGE become zero.
 
-    duty = voltage_to_duty(
-        voltage
+    if front_voltage < MIN_MOTOR_VOLTAGE:
+        front_voltage = 0.0
+
+    if rear_voltage < MIN_MOTOR_VOLTAGE:
+        rear_voltage = 0.0
+
+    front_voltage = min(
+        PICO_PWM_VOLTAGE,
+        front_voltage
     )
 
-    for pwm in MOTOR_PWMS:
+    rear_voltage = min(
+        PICO_PWM_VOLTAGE,
+        rear_voltage
+    )
+
+    front_duty = voltage_to_duty(
+        front_voltage
+    )
+
+    rear_duty = voltage_to_duty(
+        rear_voltage
+    )
+
+    for pwm in FRONT_MOTOR_PWMS:
 
         pwm.duty_u16(
-            duty
+            front_duty
         )
+
+    for pwm in REAR_MOTOR_PWMS:
+
+        pwm.duty_u16(
+            rear_duty
+        )
+
+
+def set_all_motor_voltage(voltage):
+
+    set_motor_voltages(
+        voltage,
+        voltage
+    )
 
 
 # ============================================================
@@ -396,10 +482,40 @@ def get_throttle_fraction(y):
     )
 
 
+def get_front_max_voltage(
+    mode,
+    speed
+):
+
+    if mode == "TERRAIN":
+
+        return TERRAIN_FRONT_MAX_VOLTAGE
+
+    if mode == "SNOW":
+
+        return SNOW_MAX_VOLTAGE[
+            speed
+        ]
+
+    # ROAD
+    return ROAD_MAX_VOLTAGE[
+        speed
+    ]
+
+
 def joystick_to_motor_voltage(
     y,
-    current_speed_mode
+    mode,
+    speed
 ):
+
+    """
+    Calculate the base/front motor voltage from the joystick.
+
+    The throttle mapping itself is unchanged from the previous
+    control system. Only the source of the maximum voltage has
+    changed.
+    """
 
     throttle = get_throttle_fraction(
         y
@@ -411,9 +527,10 @@ def joystick_to_motor_voltage(
     if throttle <= MIN_VOLTAGE_REGION:
         return MIN_MOTOR_VOLTAGE
 
-    max_v = SPEED_MAX_VOLTAGE[
-        current_speed_mode
-    ]
+    max_v = get_front_max_voltage(
+        mode,
+        speed
+    )
 
     remaining_fraction = (
         (
@@ -450,10 +567,47 @@ def joystick_to_motor_voltage(
 
 
 # ============================================================
+# FRONT / REAR MOTOR COMMANDS
+# ============================================================
+
+def get_rear_voltage(
+    front_voltage,
+    mode,
+    speed
+):
+
+    if front_voltage <= 0.0:
+        return 0.0
+
+    if mode != "TERRAIN":
+        return front_voltage
+
+    multiplier = (
+        TERRAIN_REAR_MULTIPLIER[
+            speed
+        ]
+    )
+
+    rear_voltage = (
+        front_voltage
+        * multiplier
+    )
+
+    return min(
+        PICO_PWM_VOLTAGE,
+        rear_voltage
+    )
+
+
+# ============================================================
 # MOTOR SLEW / SLOW START
 # ============================================================
 
-def update_motor_voltage(target_v):
+def update_motor_voltage(
+    target_v,
+    mode,
+    speed
+):
 
     global motor_current_v
     global motor_accel_step_v
@@ -466,11 +620,15 @@ def update_motor_voltage(target_v):
             MOTOR_START_SLEW_STEP_V
         )
 
-        set_motor_voltage(
+        set_motor_voltages(
+            0.0,
             0.0
         )
 
-        return motor_current_v
+        return (
+            0.0,
+            0.0
+        )
 
     if motor_current_v <= 0.0:
 
@@ -482,13 +640,7 @@ def update_motor_voltage(target_v):
             MOTOR_START_SLEW_STEP_V
         )
 
-        set_motor_voltage(
-            motor_current_v
-        )
-
-        return motor_current_v
-
-    if motor_current_v < target_v:
+    elif motor_current_v < target_v:
 
         difference = (
             target_v
@@ -529,11 +681,25 @@ def update_motor_voltage(target_v):
         )
     )
 
-    set_motor_voltage(
+    front_voltage = (
         motor_current_v
     )
 
-    return motor_current_v
+    rear_voltage = get_rear_voltage(
+        front_voltage,
+        mode,
+        speed
+    )
+
+    set_motor_voltages(
+        front_voltage,
+        rear_voltage
+    )
+
+    return (
+        front_voltage,
+        rear_voltage
+    )
 
 
 # ============================================================
@@ -552,10 +718,15 @@ SERVO_RIGHT = 1900
 
 SERVO_RELEASE_DELAY_MS = 500
 
+# Steering rate remains mode-dependent.
+#
+# TERRAIN keeps the previous TERRAIN rate.
+# ROAD keeps the current ROAD rate.
+# SNOW currently uses the previous MEDIUM rate.
 STEERING_STEP_US = {
     "TERRAIN": 8,
-    "MEDIUM": 4,
-    "ROAD": 2,
+    "SNOW": 4,
+    "ROAD": 4,
 }
 
 servo_current_us = SERVO_CENTER
@@ -684,7 +855,7 @@ def joystick_to_servo(x):
 
 def update_servo(
     target_us,
-    current_speed_mode,
+    mode,
     joystick_x
 ):
 
@@ -706,7 +877,7 @@ def update_servo(
         servo_last_active_ms = now
 
     max_step = STEERING_STEP_US[
-        current_speed_mode
+        mode
     ]
 
     difference = (
@@ -760,8 +931,8 @@ def update_servo(
 
 def stop_outputs():
     """
-    Immediately set motor PWM to zero and disable the steering
-    servo.
+    Immediately set all four motor PWM outputs to zero and
+    disable the steering servo.
 
     Safe for main.py to call even if the control loop is not
     currently running.
@@ -825,7 +996,8 @@ def run(
         MOTOR_START_SLEW_STEP_V
     )
 
-    set_motor_voltage(
+    set_motor_voltages(
+        0.0,
         0.0
     )
 
@@ -841,9 +1013,8 @@ def run(
         ticks_ms()
     )
 
-    current_speed_mode = (
-        read_speed_mode()
-    )
+    mode = read_mode()
+    speed = read_speed()
 
     throttle_armed = False
 
@@ -883,13 +1054,8 @@ def run(
         x = x_adc.read_u16()
         y = y_adc.read_u16()
 
-        current_displayed_speed = (
-            read_displayed_speed()
-        )
-
-        current_speed_mode = (
-            read_speed_mode()
-        )
+        speed = read_speed()
+        mode = read_mode()
 
         # ----------------------------------------------------
         # STEERING
@@ -901,7 +1067,7 @@ def run(
 
         servo_us = update_servo(
             servo_target,
-            current_speed_mode,
+            mode,
             x
         )
 
@@ -928,7 +1094,8 @@ def run(
             motor_target_v = (
                 joystick_to_motor_voltage(
                     y,
-                    current_speed_mode
+                    mode,
+                    speed
                 )
             )
 
@@ -936,8 +1103,12 @@ def run(
 
             motor_target_v = 0.0
 
-        motor_v = update_motor_voltage(
-            motor_target_v
+        front_v, rear_v = (
+            update_motor_voltage(
+                motor_target_v,
+                mode,
+                speed
+            )
         )
 
         # ----------------------------------------------------
@@ -963,14 +1134,15 @@ def run(
 
             log(
                 "X: {:+.1f}% | Y: {:+.1f}% | "
-                "Voltage: {:.3f} V | Servo: {} | "
-                "Mode: {} | Speed: {}".format(
+                "Front: {:.3f} V | Rear: {:.3f} V | "
+                "Servo: {} | Mode: {} | Speed: {}".format(
                     x_percent,
                     y_percent,
-                    motor_v,
+                    front_v,
+                    rear_v,
                     servo_us,
-                    current_speed_mode,
-                    current_displayed_speed
+                    mode,
+                    speed
                 )
             )
 
@@ -1009,10 +1181,10 @@ def self_test():
     It tests:
     - steering joystick
     - throttle joystick
+    - mode selector
     - speed selector
     - all four motor PWM outputs
     - steering servo
-    - GP20 / GP21 speed input
     - normal diagnostics
 
     Throttle neutral arming remains active.
@@ -1035,7 +1207,11 @@ def self_test():
     )
 
     print(
-    "GP20 and GP21 select displayed Speed 1 / 2 / 3."
+        "GP4 and GP7 select TERRAIN / SNOW / ROAD."
+    )
+
+    print(
+        "GP20 and GP21 select Speed 1 / 2 / 3."
     )
 
     print()
