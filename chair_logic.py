@@ -303,8 +303,8 @@ TERRAIN_FRONT_MAX_VOLTAGE = 1.80
 # Rear-wheel command multiplier in TERRAIN mode.
 TERRAIN_REAR_MULTIPLIER = {
     "LOW": 1.00,
-    "MEDIUM": 1.15,
-    "HIGH": 1.30,
+    "MEDIUM": 1.2,
+    "HIGH": 1.5,
 }
 
 THROTTLE_EXPONENT = 2.0
