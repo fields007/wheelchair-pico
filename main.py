@@ -199,8 +199,12 @@ def start_log():
 
         with open(
             LOG_FILE,
-            "w"
+            "a"
         ) as file:
+
+            file.write(
+                "\n==============================\n"
+            )
 
             file.write(
                 "BOOT\n"
@@ -209,7 +213,7 @@ def start_log():
     except Exception as error:
 
         print(
-            "Could not create log:",
+            "Could not open log:",
             error
         )
 
