@@ -32,9 +32,9 @@ Modes:
 - ROAD
 
 Speeds:
-- 1
-- 2
-- 3
+- LOW
+- MEDIUM
+- HIGH
 
 The status LED and network/maintenance button are handled
 by main.py.
@@ -224,9 +224,9 @@ def read_mode():
 # Three-position speed input:
 #
 # GP20   GP21   Speed
-#  0      1       3
-#  1      1       2
-#  1      0       1
+#  0      1     HIGH
+#  1      1     MEDIUM
+#  1      0     LOW
 #
 #  0      0     invalid
 #
@@ -245,7 +245,7 @@ speed_gp21 = Pin(
     Pin.PULL_UP
 )
 
-current_speed = 2
+current_speed = "MEDIUM"
 
 
 def read_speed():
@@ -257,15 +257,15 @@ def read_speed():
 
     if p20 == 0 and p21 == 1:
 
-        current_speed = 3
+        current_speed = "HIGH"
 
     elif p20 == 1 and p21 == 1:
 
-        current_speed = 2
+        current_speed = "MEDIUM"
 
     elif p20 == 1 and p21 == 0:
 
-        current_speed = 1
+        current_speed = "LOW"
 
     # p20 == 0 and p21 == 0 is invalid.
     # Retain the previous valid speed.
@@ -282,18 +282,18 @@ MIN_MOTOR_VOLTAGE = 1.60
 # ROAD mode reproduces the three maximum voltages that were
 # previously selected by TERRAIN / MEDIUM / ROAD.
 ROAD_MAX_VOLTAGE = {
-    1: 1.90,
-    2: 2.20,
-    3: 3.30,
+    "LOW": 1.90,
+    "MEDIUM": 2.20,
+    "HIGH": 3.30,
 }
 
 # SNOW is intentionally left without special behaviour for now.
 # Until its behaviour is defined, it uses the normal ROAD
 # speed mapping.
 SNOW_MAX_VOLTAGE = {
-    1: 1.90,
-    2: 2.20,
-    3: 3.30,
+    "LOW": 1.90,
+    "MEDIUM": 2.20,
+    "HIGH": 3.30,
 }
 
 # In TERRAIN mode the front wheels always have the same
@@ -302,9 +302,9 @@ TERRAIN_FRONT_MAX_VOLTAGE = 1.80
 
 # Rear-wheel command multiplier in TERRAIN mode.
 TERRAIN_REAR_MULTIPLIER = {
-    1: 1.00,
-    2: 1.15,
-    3: 1.30,
+    "LOW": 1.00,
+    "MEDIUM": 1.15,
+    "HIGH": 1.30,
 }
 
 THROTTLE_EXPONENT = 2.0
@@ -718,15 +718,30 @@ SERVO_RIGHT = 1900
 
 SERVO_RELEASE_DELAY_MS = 500
 
-# Steering rate remains mode-dependent.
+# Maximum steering movement per 20 ms control loop.
 #
-# TERRAIN keeps the previous TERRAIN rate.
-# ROAD keeps the current ROAD rate.
-# SNOW currently uses the previous MEDIUM rate.
+# TERRAIN:
+#     LOW / MEDIUM / HIGH = 8 us
+#
+# ROAD and SNOW:
+#     LOW = 8 us
+#     MEDIUM / HIGH = 4 us
 STEERING_STEP_US = {
-    "TERRAIN": 8,
-    "SNOW": 4,
-    "ROAD": 4,
+    "TERRAIN": {
+        "LOW": 8,
+        "MEDIUM": 8,
+        "HIGH": 8,
+    },
+    "SNOW": {
+        "LOW": 8,
+        "MEDIUM": 4,
+        "HIGH": 4,
+    },
+    "ROAD": {
+        "LOW": 8,
+        "MEDIUM": 4,
+        "HIGH": 4,
+    },
 }
 
 servo_current_us = SERVO_CENTER
@@ -856,6 +871,7 @@ def joystick_to_servo(x):
 def update_servo(
     target_us,
     mode,
+    speed,
     joystick_x
 ):
 
@@ -878,6 +894,8 @@ def update_servo(
 
     max_step = STEERING_STEP_US[
         mode
+    ][
+        speed
     ]
 
     difference = (
@@ -1068,6 +1086,7 @@ def run(
         servo_us = update_servo(
             servo_target,
             mode,
+            speed,
             x
         )
 
@@ -1211,7 +1230,7 @@ def self_test():
     )
 
     print(
-        "GP20 and GP21 select Speed 1 / 2 / 3."
+        "GP20 and GP21 select LOW / MEDIUM / HIGH."
     )
 
     print()
