@@ -1120,9 +1120,48 @@ def handle_update():
         "Update installed successfully."
     )
 
-    request_reconnect_after_reboot(
+    # --------------------------------------------------------
+    # DIAGNOSTIC: CREATE RECONNECT FLAG
+    # --------------------------------------------------------
+
+    flag_ok = request_reconnect_after_reboot(
         "update"
     )
+
+    local_event_log(
+        "Reconnect flag created: {}".format(
+            flag_ok
+        )
+    )
+
+    # --------------------------------------------------------
+    # DIAGNOSTIC: READ FLAG BACK BEFORE REBOOT
+    # --------------------------------------------------------
+
+    try:
+
+        with open(
+            RECONNECT_FILE,
+            "r"
+        ) as file:
+
+            flag_contents = (
+                file.read().strip()
+            )
+
+        local_event_log(
+            "Reconnect flag contains: {}".format(
+                flag_contents
+            )
+        )
+
+    except Exception as error:
+
+        local_event_log(
+            "Could not verify reconnect flag: {}".format(
+                error
+            )
+        )
 
     local_event_log(
         "Rebooting after update."
@@ -1567,6 +1606,14 @@ led.value(0)
 # Consume the one-shot reconnect reason immediately.
 auto_reconnect_reason = (
     take_reconnect_after_reboot()
+)
+
+# Diagnostic output. This tells us whether a reconnect request
+# survived the previous reset.
+local_event_log(
+    "Post-reboot reconnect reason: {}".format(
+        auto_reconnect_reason
+    )
 )
 
 
