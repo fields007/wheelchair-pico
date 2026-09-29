@@ -211,9 +211,9 @@ def read_speed_mode():
 # Three-position speed input:
 #
 # GP20   GP21   Speed
-#  0      1       1
+#  0      1       3
 #  1      1       2
-#  1      0       3
+#  1      0       1
 #
 #  0      0     invalid
 #
@@ -244,7 +244,7 @@ def read_displayed_speed():
 
     if p20 == 0 and p21 == 1:
 
-        displayed_speed = 1
+        displayed_speed = 3
 
     elif p20 == 1 and p21 == 1:
 
@@ -252,7 +252,7 @@ def read_displayed_speed():
 
     elif p20 == 1 and p21 == 0:
 
-        displayed_speed = 3
+        displayed_speed = 1
 
     # p20 == 0 and p21 == 0 is invalid.
     # Retain the previous valid value.

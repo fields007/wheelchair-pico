@@ -33,6 +33,8 @@ Supported commands:
     update
     rollback
     reboot
+    logs-on
+    logs-off
     add-wifi|SSID|PASSWORD
 
 When imported:
@@ -52,6 +54,8 @@ COMMAND_CHECK_UPDATE = "check-update"
 COMMAND_UPDATE = "update"
 COMMAND_ROLLBACK = "rollback"
 COMMAND_REBOOT = "reboot"
+COMMAND_LOGS_ON = "logs-on"
+COMMAND_LOGS_OFF = "logs-off"
 COMMAND_ADD_WIFI = "add-wifi"
 
 
@@ -109,34 +113,20 @@ def parse(command_text):
     # SIMPLE COMMANDS
     # --------------------------------------------------------
 
-    if command_text == COMMAND_STATUS:
+    simple_commands = (
+        COMMAND_STATUS,
+        COMMAND_CHECK_UPDATE,
+        COMMAND_UPDATE,
+        COMMAND_ROLLBACK,
+        COMMAND_REBOOT,
+        COMMAND_LOGS_ON,
+        COMMAND_LOGS_OFF,
+    )
+
+    if command_text in simple_commands:
 
         return {
-            "command": COMMAND_STATUS
-        }
-
-    if command_text == COMMAND_CHECK_UPDATE:
-
-        return {
-            "command": COMMAND_CHECK_UPDATE
-        }
-
-    if command_text == COMMAND_UPDATE:
-
-        return {
-            "command": COMMAND_UPDATE
-        }
-
-    if command_text == COMMAND_ROLLBACK:
-
-        return {
-            "command": COMMAND_ROLLBACK
-        }
-
-    if command_text == COMMAND_REBOOT:
-
-        return {
-            "command": COMMAND_REBOOT
+            "command": command_text
         }
 
     # --------------------------------------------------------
@@ -307,6 +297,12 @@ def requires_chair_stop(command):
     check-update:
         No from a logical perspective, although main.py may
         choose when to perform the network request.
+
+    logs-on:
+        No. Only changes remote telemetry state.
+
+    logs-off:
+        No. Only changes remote telemetry state.
 
     add-wifi:
         No. It only modifies saved Wi-Fi configuration.
@@ -525,6 +521,14 @@ def self_test():
             "reboot",
             COMMAND_REBOOT
         ),
+        (
+            "logs-on",
+            COMMAND_LOGS_ON
+        ),
+        (
+            "logs-off",
+            COMMAND_LOGS_OFF
+        ),
     )
 
     for text, expected in tests:
@@ -583,6 +587,8 @@ def self_test():
         "",
         "hello",
         "restart",
+        "logs",
+        "logs-on-now",
         "add-wifi",
         "add-wifi|",
         "add-wifi||password"
@@ -731,7 +737,9 @@ def self_test():
     non_stop_commands = (
         COMMAND_STATUS,
         COMMAND_CHECK_UPDATE,
-        COMMAND_ADD_WIFI
+        COMMAND_ADD_WIFI,
+        COMMAND_LOGS_ON,
+        COMMAND_LOGS_OFF
     )
 
     for command_name in stop_commands:

@@ -19,8 +19,15 @@ When GP9 is pressed:
     6. Three slow flashes indicate failure.
     7. Wheelchair control resumes.
 
+After a remotely requested reboot, successful update or
+successful rollback, the supervisor automatically attempts to
+reconnect to Wi-Fi and MQTT once.
+
+A normal power-on or unrelated reboot does NOT automatically
+connect.
+
 When MQTT is connected:
-- live chair diagnostics are sent remotely
+- live chair diagnostics can be sent remotely
 - remote commands are received
 
 If networking is later lost, wheelchair operation continues.
@@ -35,15 +42,37 @@ Supported commands:
     update
     rollback
     reboot
+    logs-on
+    logs-off
     add-wifi|SSID|PASSWORD
 
 Update, rollback and reboot always stop chair control first.
+
+REMOTE TELEMETRY
+----------------
+The commands:
+
+    logs-off
+
+and:
+
+    logs-on
+
+disable and enable only the continuous chair telemetry sent
+through MQTT.
+
+Local USB / REPL chair diagnostics continue regardless.
+
+Important supervisor event messages are still sent remotely
+even when telemetry is disabled.
+
+Remote telemetry defaults to ON after every reboot.
 
 LOGGING
 -------
 Normal chair diagnostics:
 - printed over USB / REPL
-- latest message queued for MQTT
+- latest message queued for MQTT when remote telemetry is ON
 - NOT continuously written to flash
 
 Important supervisor events:
@@ -52,8 +81,7 @@ Important supervisor events:
 - queued for MQTT
 
 This avoids writing joystick telemetry to flash five times per
-second and avoids publishing MQTT synchronously from the
-real-time chair control loop.
+second.
 
 RECOVERY
 --------
@@ -62,6 +90,10 @@ stopped and the supervisor enters recovery mode.
 
 GP9 can then be used to establish networking, allowing remote
 rollback, update, status and reboot commands.
+
+If recovery mode is entered immediately after a remotely
+requested reboot/update/rollback, the one-shot automatic
+network connection is still attempted.
 """
 
 from machine import Pin
@@ -73,6 +105,7 @@ from time import (
 
 import machine
 import sys
+import os
 
 import system.wifi_manager as wifi_manager
 import system.mqtt_manager as mqtt_manager
@@ -86,22 +119,25 @@ import system.updater as updater
 
 LOG_FILE = "maintenance.log"
 
+# One-shot flag used to request automatic network reconnection
+# after a remotely requested reset.
+RECONNECT_FILE = "reconnect_after_reboot.flag"
+
 # How often MQTT is checked while the chair is running.
-#
-# chair_logic calls supervisor_service() every 20 ms, but
-# network servicing is deliberately less frequent.
 MQTT_SERVICE_INTERVAL_MS = 200
 
 # Only the latest unsent telemetry message is retained.
-#
-# If networking is temporarily slow, old telemetry is discarded
-# rather than delaying chair control.
 pending_telemetry = None
 
-# Supervisor event messages are small and infrequent.
+# Whether continuous chair telemetry is sent remotely.
 #
-# Keep a short RAM queue so important messages can be sent when
-# MQTT is serviced.
+# This affects MQTT telemetry only.
+# Local USB / REPL diagnostics always continue.
+#
+# Deliberately defaults to True after every reboot.
+remote_telemetry_enabled = True
+
+# Supervisor event messages are small and infrequent.
 EVENT_QUEUE_LIMIT = 20
 pending_events = []
 
@@ -194,6 +230,86 @@ def write_event_to_file(message):
 
 
 # ============================================================
+# RECONNECT-AFTER-REBOOT FLAG
+# ============================================================
+
+def request_reconnect_after_reboot():
+    """
+    Create the one-shot flag that asks the next boot to
+    automatically connect to Wi-Fi and MQTT.
+    """
+
+    try:
+
+        with open(
+            RECONNECT_FILE,
+            "w"
+        ) as file:
+
+            file.write(
+                "1"
+            )
+
+        return True
+
+    except Exception as error:
+
+        event_log(
+            "Could not create reconnect flag: {}".format(
+                error
+            )
+        )
+
+        return False
+
+
+def take_reconnect_after_reboot():
+    """
+    Check for and consume the one-shot reconnect flag.
+
+    Returns True if the flag existed.
+
+    The flag is deleted immediately so that a later unrelated
+    reboot does not cause another automatic connection attempt.
+    """
+
+    try:
+
+        os.stat(
+            RECONNECT_FILE
+        )
+
+    except OSError:
+
+        return False
+
+    # The flag exists.
+    #
+    # Delete it before attempting any networking so the request
+    # remains genuinely one-shot.
+    try:
+
+        os.remove(
+            RECONNECT_FILE
+        )
+
+    except Exception as error:
+
+        event_log(
+            "Could not remove reconnect flag: {}".format(
+                error
+            )
+        )
+
+        # Do not automatically connect if we could not consume
+        # the flag. Otherwise every reboot could repeatedly
+        # trigger an automatic connection.
+        return False
+
+    return True
+
+
+# ============================================================
 # MQTT QUEUES
 # ============================================================
 
@@ -233,6 +349,8 @@ def event_log(message=""):
 
     Printed immediately, stored in maintenance.log and queued
     for MQTT.
+
+    These messages are NOT affected by logs-on / logs-off.
     """
 
     message = str(message)
@@ -254,10 +372,12 @@ def chair_log(message=""):
     """
     Logging callback supplied to chair_logic.
 
-    Chair diagnostics are printed immediately and the newest
-    message is retained for remote MQTT telemetry.
+    Chair diagnostics are always printed locally.
 
-    They are NOT continuously written to flash.
+    When remote telemetry is enabled, the newest diagnostic
+    message is also retained for MQTT.
+
+    Chair diagnostics are NOT continuously written to flash.
     """
 
     message = str(message)
@@ -266,8 +386,50 @@ def chair_log(message=""):
         message
     )
 
-    queue_telemetry(
-        message
+    if remote_telemetry_enabled:
+
+        queue_telemetry(
+            message
+        )
+
+
+# ============================================================
+# REMOTE TELEMETRY CONTROL
+# ============================================================
+
+def handle_logs_off():
+    """
+    Disable continuous chair telemetry over MQTT.
+
+    Local USB / REPL diagnostics and important supervisor
+    events continue normally.
+    """
+
+    global remote_telemetry_enabled
+    global pending_telemetry
+
+    remote_telemetry_enabled = False
+
+    # Discard any diagnostic waiting to be transmitted so that
+    # no old telemetry appears after logs-off.
+    pending_telemetry = None
+
+    event_log(
+        "Remote real-time logs disabled."
+    )
+
+
+def handle_logs_on():
+    """
+    Enable continuous chair telemetry over MQTT.
+    """
+
+    global remote_telemetry_enabled
+
+    remote_telemetry_enabled = True
+
+    event_log(
+        "Remote real-time logs enabled."
     )
 
 
@@ -324,7 +486,7 @@ def connection_failed_pattern():
 
 def check_connection_button():
     """
-    Check GP9 without blocking for 50 ms.
+    Check GP9.
 
     Returns True once per physical button press.
     """
@@ -376,7 +538,6 @@ def mqtt_command_received(command_text):
     Called by mqtt_manager when a command arrives.
 
     The command manager only validates and queues it.
-    No update, reboot or other substantial work happens here.
     """
 
     command_manager.receive(
@@ -399,9 +560,6 @@ def flush_one_mqtt_message():
     Send at most one queued MQTT message.
 
     Important events have priority over telemetry.
-
-    Sending only one message per service cycle prevents a
-    backlog from causing a long burst of blocking network work.
     """
 
     global pending_telemetry
@@ -430,7 +588,11 @@ def flush_one_mqtt_message():
         return False
 
     # Then latest telemetry.
-    if pending_telemetry is not None:
+    if (
+        remote_telemetry_enabled
+        and
+        pending_telemetry is not None
+    ):
 
         message = pending_telemetry
 
@@ -440,9 +602,8 @@ def flush_one_mqtt_message():
                 message
             ):
 
-                # Only clear it if no newer telemetry replaced it
-                # during the operation.
                 if pending_telemetry == message:
+
                     pending_telemetry = None
 
                 return True
@@ -502,11 +663,6 @@ def supervisor_service():
 
     Returns True when chair_logic should stop and return to
     main.py.
-
-    This callback:
-    - checks GP9
-    - periodically services MQTT
-    - checks whether a stop-required remote command is pending
     """
 
     # GP9 always requests a stop so networking can be attempted.
@@ -529,12 +685,8 @@ def supervisor_service():
 
         return True
 
-    # Non-stop commands are handled by the supervisor below.
-    #
-    # We still return True temporarily because status,
-    # check-update and add-wifi can involve networking or flash
-    # I/O. Keeping that work outside the 20 ms chair loop is
-    # preferable to doing it during active control.
+    # Non-stop commands are still processed outside the
+    # real-time chair loop.
     return True
 
 
@@ -542,7 +694,9 @@ def supervisor_service():
 # NETWORK CONNECTION
 # ============================================================
 
-def connect_network():
+def connect_network(
+    wait_for_release=True
+):
     """
     Attempt Wi-Fi and then MQTT.
 
@@ -553,6 +707,10 @@ def connect_network():
         solid while connecting
         5 quick flashes = Wi-Fi + MQTT success
         3 slow flashes = failure
+
+    wait_for_release should be True for a GP9-triggered
+    connection and False for an automatic post-reboot
+    connection.
     """
 
     event_log("")
@@ -570,7 +728,7 @@ def connect_network():
         "Wheelchair outputs temporarily disabled."
     )
 
-    # Solid LED during the whole connection attempt.
+    # Solid LED during connection attempt.
     led.value(1)
 
     wifi_ok = False
@@ -638,7 +796,13 @@ def connect_network():
 
         connection_failed_pattern()
 
-    wait_for_button_release()
+    # A physical GP9 request waits until GP9 has been released.
+    #
+    # An automatic post-reboot connection has no button press
+    # to wait for.
+    if wait_for_release:
+
+        wait_for_button_release()
 
     led.value(0)
 
@@ -742,6 +906,16 @@ def report_status():
         )
     )
 
+    # Remote chair telemetry
+    event_log(
+        "Remote telemetry: {}".format(
+            "ON"
+            if remote_telemetry_enabled
+            else "OFF"
+        )
+    )
+
+    # Supervisor mode
     event_log(
         "Mode: {}".format(
             "RECOVERY"
@@ -906,13 +1080,15 @@ def handle_update():
         "Update installed successfully."
     )
 
+    # Ask the next boot to reconnect automatically.
+    request_reconnect_after_reboot()
+
     event_log(
         "Rebooting."
     )
 
-    # Give USB and MQTT a brief opportunity to transmit output.
-    flush_one_mqtt_message()
-
+    # Do not perform a potentially blocking MQTT publish here.
+    # Once the update is installed, reboot promptly.
     sleep_ms(500)
 
     machine.reset()
@@ -961,11 +1137,12 @@ def handle_rollback():
         "Rollback completed successfully."
     )
 
+    # Ask the next boot to reconnect automatically.
+    request_reconnect_after_reboot()
+
     event_log(
         "Rebooting."
     )
-
-    flush_one_mqtt_message()
 
     sleep_ms(500)
 
@@ -987,7 +1164,12 @@ def handle_reboot():
         "Wheelchair outputs are disabled."
     )
 
-    flush_one_mqtt_message()
+    # Ask the next boot to reconnect automatically.
+    request_reconnect_after_reboot()
+
+    event_log(
+        "Rebooting."
+    )
 
     sleep_ms(500)
 
@@ -1037,6 +1219,14 @@ def process_pending_command():
             command
         )
 
+    elif command_name == command_manager.COMMAND_LOGS_OFF:
+
+        handle_logs_off()
+
+    elif command_name == command_manager.COMMAND_LOGS_ON:
+
+        handle_logs_on()
+
     elif command_name == command_manager.COMMAND_UPDATE:
 
         handle_update()
@@ -1077,7 +1267,6 @@ def load_chair_logic():
 
     try:
 
-        # Remove an old cached module if necessary.
         if "chair_logic" in sys.modules:
 
             del sys.modules[
@@ -1145,10 +1334,35 @@ def stop_chair_outputs():
 
 
 # ============================================================
+# AUTOMATIC POST-REBOOT CONNECTION
+# ============================================================
+
+def automatic_reconnect():
+    """
+    Perform the one-shot automatic network connection requested
+    by a remote reboot/update/rollback.
+
+    The reconnect flag has already been deleted before this
+    function is called.
+    """
+
+    event_log("")
+    event_log(
+        "Automatic network reconnect requested after reboot."
+    )
+
+    connect_network(
+        wait_for_release=False
+    )
+
+
+# ============================================================
 # RECOVERY MODE
 # ============================================================
 
-def recovery_loop():
+def recovery_loop(
+    auto_reconnect=False
+):
     """
     Recovery supervisor.
 
@@ -1156,13 +1370,8 @@ def recovery_loop():
 
     GP9 can establish Wi-Fi/MQTT.
 
-    Once MQTT is connected, commands can be received and
-    processed, particularly:
-
-        rollback
-        update
-        status
-        reboot
+    If auto_reconnect is True, one automatic connection attempt
+    is made before entering the recovery loop.
     """
 
     global last_mqtt_service_ms
@@ -1184,6 +1393,10 @@ def recovery_loop():
         "Wheelchair control is disabled."
     )
 
+    if auto_reconnect:
+
+        automatic_reconnect()
+
     event_log(
         "Press GP9 to connect to the network."
     )
@@ -1196,7 +1409,9 @@ def recovery_loop():
 
         if check_connection_button():
 
-            connect_network()
+            connect_network(
+                wait_for_release=True
+            )
 
             event_log(
                 "Recovery mode remains active."
@@ -1249,6 +1464,14 @@ event_log(
 
 led.value(0)
 
+# Consume the one-shot flag immediately during boot.
+#
+# This tells us whether this boot followed a remotely requested
+# reboot/update/rollback.
+auto_reconnect_requested = (
+    take_reconnect_after_reboot()
+)
+
 
 # ============================================================
 # MAIN SUPERVISOR
@@ -1262,7 +1485,19 @@ try:
 
     if not load_chair_logic():
 
-        recovery_loop()
+        recovery_loop(
+            auto_reconnect=auto_reconnect_requested
+        )
+
+    # --------------------------------------------------------
+    # AUTOMATIC POST-REBOOT NETWORK CONNECTION
+    # --------------------------------------------------------
+
+    if auto_reconnect_requested:
+
+        # chair_logic has loaded, but chair control has not yet
+        # started, so outputs remain stopped during networking.
+        automatic_reconnect()
 
     # --------------------------------------------------------
     # NORMAL OPERATION
@@ -1287,7 +1522,6 @@ try:
 
         except Exception as error:
 
-            # Chair logic itself failed at runtime.
             stop_chair_outputs()
 
             recovery_mode = True
@@ -1329,7 +1563,9 @@ try:
                 "Entering network connection mode..."
             )
 
-            connect_network()
+            connect_network(
+                wait_for_release=True
+            )
 
             event_log(
                 "Resuming wheelchair control."
@@ -1347,8 +1583,8 @@ try:
 
             # update / rollback / reboot normally reset the Pico.
             #
-            # status / check-update / add-wifi return here and
-            # normal chair control resumes.
+            # Other commands return here and normal chair
+            # control resumes.
 
             event_log(
                 "Resuming wheelchair control."
@@ -1356,9 +1592,7 @@ try:
 
             continue
 
-        # This normally should not happen, but if chair_logic
-        # returned without a known reason simply restart it.
-
+        # This normally should not happen.
         event_log(
             "Chair control returned without a pending request."
         )
