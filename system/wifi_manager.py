@@ -181,11 +181,15 @@ def connect(log=print):
         )
     )
 
+    # Use the current MicroPython station-interface API.
     wlan = network.WLAN(
-        network.STA_IF
+        network.WLAN.IF_STA
     )
 
     wlan.active(True)
+
+    # Give the CYW43 Wi-Fi subsystem time to initialise.
+    sleep_ms(500)
 
     # Something may already have connected Wi-Fi.
     if wlan.isconnected():
@@ -199,6 +203,25 @@ def connect(log=print):
         )
 
         return True
+
+    # Perform a scan before connecting.
+    #
+    # On the Pico 2 W this also gives the CYW43 Wi-Fi
+    # subsystem an opportunity to finish initialising before
+    # wlan.connect() is called.
+    try:
+
+        log("Scanning for Wi-Fi networks.")
+
+        wlan.scan()
+
+    except Exception as error:
+
+        log(
+            "Initial Wi-Fi scan failed: {}".format(
+                error
+            )
+        )
 
     for entry in networks:
 
@@ -223,9 +246,11 @@ def connect(log=print):
 
         # Disconnect from any previous failed attempt.
         try:
+
             wlan.disconnect()
 
         except Exception:
+
             pass
 
         sleep_ms(200)
