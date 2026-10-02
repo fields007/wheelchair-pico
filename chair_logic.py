@@ -16,7 +16,17 @@ Inputs:
 - steering joystick: GP27 / ADC1
 - throttle joystick: GP28 / ADC2
 - mode selector: GP4 and GP7
-- speed selector: GP20 and GP21
+
+Speed selection:
+- The backward half of the throttle joystick is RESERVED
+  exclusively for speed selection.
+- Pull backward past the switching threshold.
+- Hold for SPEED_CHANGE_HOLD_MS.
+- Return to neutral.
+- Speed then advances:
+      LOW -> MEDIUM -> HIGH -> LOW
+
+Backward joystick movement NEVER commands the motors.
 
 Outputs:
 - steering servo: GP10
@@ -25,6 +35,7 @@ Outputs:
     BL: GP18
     FR: GP14
     FL: GP15
+- status LED: GP2
 
 Modes:
 - TERRAIN
@@ -36,8 +47,14 @@ Speeds:
 - MEDIUM
 - HIGH
 
-The status LED and network/maintenance button are handled
-by main.py.
+Speed LED:
+- LOW:    solid ON
+- MEDIUM: slow blink
+- HIGH:   fast blink
+
+main.py may use the status LED during startup/network connection.
+Once run() starts, this module takes over the LED for speed
+indication.
 
 When run directly:
     The real chair control loop is started as a self-test.
@@ -132,7 +149,7 @@ def get_y_percentage(y):
     if abs(y - Y_CENTER) <= Y_DEADZONE:
         return 0.0
 
-    if y < Y_CENTER:
+    if y < X_CENTER:
 
         y = max(
             y,
@@ -218,59 +235,265 @@ def read_mode():
 
 
 # ============================================================
-# SPEED SELECTOR
+# SPEED SELECTION USING BACKWARD JOYSTICK
 # ============================================================
 
-# Three-position speed input:
-#
-# GP20   GP21   Speed
-#  0      1     HIGH
-#  1      1     MEDIUM
-#  1      0     LOW
-#
-#  0      0     invalid
-#
-# If an invalid combination is detected, the previous valid
-# speed is retained.
+# Speed always starts at LOW when run() begins.
+current_speed = "LOW"
 
-speed_gp20 = Pin(
-    20,
-    Pin.IN,
-    Pin.PULL_UP
+SPEED_ORDER = (
+    "LOW",
+    "MEDIUM",
+    "HIGH",
 )
 
-speed_gp21 = Pin(
-    21,
-    Pin.IN,
-    Pin.PULL_UP
+# A deliberate backward pull is required.
+#
+# 0.70 means the joystick must be at least 70% of the way
+# from neutral to the calibrated full-backward position.
+#
+# The entire backward side remains unavailable to the motors,
+# regardless of this threshold.
+SPEED_CHANGE_BACKWARD_FRACTION = 0.70
+
+# Backward position must be held for this long before it becomes
+# an armed speed-change request.
+SPEED_CHANGE_HOLD_MS = 500
+
+# After the hold succeeds, the joystick must return into the
+# ordinary throttle neutral region before the speed changes.
+#
+# This gives us a deliberate:
+#
+#     pull -> hold -> release
+#
+# gesture rather than changing speed merely by crossing a point.
+SPEED_CHANGE_NEUTRAL_LIMIT = (
+    Y_CENTER - Y_DEADZONE
 )
 
-current_speed = "MEDIUM"
+SPEED_CHANGE_BACKWARD_THRESHOLD = int(
+    Y_CENTER
+    - SPEED_CHANGE_BACKWARD_FRACTION
+    * (
+        Y_CENTER
+        - Y_BACKWARD
+    )
+)
+
+speed_change_hold_start_ms = None
+speed_change_armed = False
 
 
-def read_speed():
+def reset_speed_change_state():
+
+    global speed_change_hold_start_ms
+    global speed_change_armed
+
+    speed_change_hold_start_ms = None
+    speed_change_armed = False
+
+
+def advance_speed():
 
     global current_speed
 
-    p20 = speed_gp20.value()
-    p21 = speed_gp21.value()
+    index = SPEED_ORDER.index(
+        current_speed
+    )
 
-    if p20 == 0 and p21 == 1:
+    index = (
+        index + 1
+    ) % len(
+        SPEED_ORDER
+    )
 
-        current_speed = "HIGH"
-
-    elif p20 == 1 and p21 == 1:
-
-        current_speed = "MEDIUM"
-
-    elif p20 == 1 and p21 == 0:
-
-        current_speed = "LOW"
-
-    # p20 == 0 and p21 == 0 is invalid.
-    # Retain the previous valid speed.
+    current_speed = SPEED_ORDER[
+        index
+    ]
 
     return current_speed
+
+
+def update_speed_selection(y):
+
+    """
+    Handle deliberate speed changes using backward joystick travel.
+
+    Sequence:
+
+        1. Pull backward beyond SPEED_CHANGE_BACKWARD_THRESHOLD.
+        2. Hold for SPEED_CHANGE_HOLD_MS.
+        3. Return to neutral.
+        4. Speed advances one step.
+
+    Pulling backward briefly does nothing.
+
+    Holding backward indefinitely changes nothing until the
+    joystick is released.
+
+    After a speed change, another complete pull-hold-release
+    gesture is required.
+    """
+
+    global speed_change_hold_start_ms
+    global speed_change_armed
+
+    now = ticks_ms()
+
+    # --------------------------------------------------------
+    # ALREADY ARMED
+    # --------------------------------------------------------
+
+    if speed_change_armed:
+
+        # Wait for joystick to return to the neutral region.
+        if y >= SPEED_CHANGE_NEUTRAL_LIMIT:
+
+            new_speed = advance_speed()
+
+            speed_change_armed = False
+            speed_change_hold_start_ms = None
+
+            return new_speed
+
+        return None
+
+    # --------------------------------------------------------
+    # BACKWARD PULL
+    # --------------------------------------------------------
+
+    if y <= SPEED_CHANGE_BACKWARD_THRESHOLD:
+
+        if speed_change_hold_start_ms is None:
+
+            speed_change_hold_start_ms = now
+
+        elif (
+            ticks_diff(
+                now,
+                speed_change_hold_start_ms
+            )
+            >= SPEED_CHANGE_HOLD_MS
+        ):
+
+            # Gesture is now armed.
+            #
+            # Do NOT change speed yet.
+            # Require release to neutral first.
+            speed_change_armed = True
+
+        return None
+
+    # --------------------------------------------------------
+    # PULL ABORTED BEFORE HOLD COMPLETED
+    # --------------------------------------------------------
+
+    speed_change_hold_start_ms = None
+
+    return None
+
+
+# ============================================================
+# STATUS / SPEED LED
+# ============================================================
+
+# main.py may use this LED while starting Wi-Fi / maintenance.
+# Once run() starts, chair_logic owns it for speed indication.
+
+status_led = Pin(
+    2,
+    Pin.OUT
+)
+
+# MEDIUM:
+# 500 ms ON / 500 ms OFF
+MEDIUM_LED_HALF_PERIOD_MS = 500
+
+# HIGH:
+# 125 ms ON / 125 ms OFF
+HIGH_LED_HALF_PERIOD_MS = 125
+
+led_last_toggle_ms = ticks_ms()
+led_state = False
+
+
+def initialise_speed_led():
+
+    global led_last_toggle_ms
+    global led_state
+
+    led_last_toggle_ms = ticks_ms()
+
+    if current_speed == "LOW":
+
+        led_state = True
+        status_led.value(1)
+
+    else:
+
+        led_state = False
+        status_led.value(0)
+
+
+def update_speed_led():
+
+    global led_last_toggle_ms
+    global led_state
+
+    now = ticks_ms()
+
+    # --------------------------------------------------------
+    # LOW = SOLID ON
+    # --------------------------------------------------------
+
+    if current_speed == "LOW":
+
+        if not led_state:
+
+            led_state = True
+            status_led.value(1)
+
+        led_last_toggle_ms = now
+
+        return
+
+    # --------------------------------------------------------
+    # SELECT BLINK RATE
+    # --------------------------------------------------------
+
+    if current_speed == "MEDIUM":
+
+        half_period_ms = (
+            MEDIUM_LED_HALF_PERIOD_MS
+        )
+
+    else:
+
+        # HIGH
+        half_period_ms = (
+            HIGH_LED_HALF_PERIOD_MS
+        )
+
+    # --------------------------------------------------------
+    # BLINK
+    # --------------------------------------------------------
+
+    if (
+        ticks_diff(
+            now,
+            led_last_toggle_ms
+        )
+        >= half_period_ms
+    ):
+
+        led_state = not led_state
+
+        status_led.value(
+            1 if led_state else 0
+        )
+
+        led_last_toggle_ms = now
 
 
 # ============================================================
@@ -279,28 +502,20 @@ def read_speed():
 
 MIN_MOTOR_VOLTAGE = 1.60
 
-# ROAD mode reproduces the three maximum voltages that were
-# previously selected by TERRAIN / MEDIUM / ROAD.
 ROAD_MAX_VOLTAGE = {
     "LOW": 1.90,
     "MEDIUM": 2.20,
     "HIGH": 3.30,
 }
 
-# SNOW is intentionally left without special behaviour for now.
-# Until its behaviour is defined, it uses the normal ROAD
-# speed mapping.
 SNOW_MAX_VOLTAGE = {
     "LOW": 1.90,
     "MEDIUM": 2.20,
     "HIGH": 3.30,
 }
 
-# In TERRAIN mode the front wheels always have the same
-# maximum voltage, regardless of selected speed.
 TERRAIN_FRONT_MAX_VOLTAGE = 1.80
 
-# Rear-wheel command multiplier in TERRAIN mode.
 TERRAIN_REAR_MULTIPLIER = {
     "LOW": 1.00,
     "MEDIUM": 1.2,
@@ -319,11 +534,11 @@ MOTOR_MAX_SLEW_STEP_V = 0.010
 MOTOR_START_SLEW_STEP_V = 0.0005
 MOTOR_SLEW_ACCELERATION_V = 0.00005
 
-# This is the base/front motor voltage.
-# In TERRAIN mode the rear voltage can be derived from this.
 motor_current_v = 0.0
 
-motor_accel_step_v = MOTOR_START_SLEW_STEP_V
+motor_accel_step_v = (
+    MOTOR_START_SLEW_STEP_V
+)
 
 
 # ============================================================
@@ -333,7 +548,6 @@ motor_accel_step_v = MOTOR_START_SLEW_STEP_V
 PICO_PWM_VOLTAGE = 3.3
 MOTOR_PWM_FREQUENCY = 20000
 
-# Explicit physical wheel positions.
 motor_BR = PWM(
     Pin(17)
 )
@@ -400,9 +614,6 @@ def set_motor_voltages(
     rear_voltage
 ):
 
-    # Preserve the original behaviour:
-    # commands below MIN_MOTOR_VOLTAGE become zero.
-
     if front_voltage < MIN_MOTOR_VOLTAGE:
         front_voltage = 0.0
 
@@ -454,6 +665,14 @@ def set_all_motor_voltage(voltage):
 
 def get_throttle_fraction(y):
 
+    # IMPORTANT:
+    #
+    # Anything at or below the forward edge of neutral produces
+    # ZERO motor command.
+    #
+    # Therefore the entire backward joystick range is reserved
+    # for speed selection and can never command the motors.
+
     throttle_start = (
         Y_CENTER
         + Y_DEADZONE
@@ -497,7 +716,6 @@ def get_front_max_voltage(
             speed
         ]
 
-    # ROAD
     return ROAD_MAX_VOLTAGE[
         speed
     ]
@@ -508,14 +726,6 @@ def joystick_to_motor_voltage(
     mode,
     speed
 ):
-
-    """
-    Calculate the base/front motor voltage from the joystick.
-
-    The throttle mapping itself is unchanged from the previous
-    control system. Only the source of the maximum voltage has
-    changed.
-    """
 
     throttle = get_throttle_fraction(
         y
@@ -718,14 +928,6 @@ SERVO_RIGHT = 1900
 
 SERVO_RELEASE_DELAY_MS = 500
 
-# Maximum steering movement per 20 ms control loop.
-#
-# TERRAIN:
-#     LOW / MEDIUM / HIGH = 8 us
-#
-# ROAD and SNOW:
-#     LOW = 8 us
-#     MEDIUM / HIGH = 4 us
 STEERING_STEP_US = {
     "TERRAIN": {
         "LOW": 8,
@@ -948,13 +1150,6 @@ def update_servo(
 # ============================================================
 
 def stop_outputs():
-    """
-    Immediately set all four motor PWM outputs to zero and
-    disable the steering servo.
-
-    Safe for main.py to call even if the control loop is not
-    currently running.
-    """
 
     global motor_current_v
     global motor_accel_step_v
@@ -980,29 +1175,14 @@ def run(
     stop_requested=None,
     log=print
 ):
-    """
-    Run wheelchair control.
-
-    stop_requested:
-        Optional callback called once per control loop.
-
-        If it returns True, all outputs are stopped and run()
-        returns to the caller.
-
-    log:
-        Function accepting exactly one string argument.
-
-        Normal print() can be used, or main.py can provide its
-        own logging function.
-
-    The throttle must return to neutral after run() starts
-    before motor drive is armed.
-    """
 
     global servo_current_us
     global servo_last_active_ms
     global motor_current_v
     global motor_accel_step_v
+    global current_speed
+    global speed_change_hold_start_ms
+    global speed_change_armed
 
     # --------------------------------------------------------
     # RESET CONTROL STATE
@@ -1032,11 +1212,22 @@ def run(
     )
 
     mode = read_mode()
-    speed = read_speed()
+
+    # Always begin normal chair operation at LOW speed.
+    current_speed = "LOW"
+
+    speed_change_hold_start_ms = None
+    speed_change_armed = False
+
+    initialise_speed_led()
 
     throttle_armed = False
 
     diagnostic_counter = 0
+
+    log(
+        "Chair control started. Speed: LOW"
+    )
 
     # --------------------------------------------------------
     # CONTROL LOOP
@@ -1072,8 +1263,31 @@ def run(
         x = x_adc.read_u16()
         y = y_adc.read_u16()
 
-        speed = read_speed()
         mode = read_mode()
+
+        # ----------------------------------------------------
+        # SPEED SELECTION
+        # ----------------------------------------------------
+
+        changed_speed = (
+            update_speed_selection(y)
+        )
+
+        if changed_speed is not None:
+
+            log(
+                "Speed changed to: {}".format(
+                    changed_speed
+                )
+            )
+
+        speed = current_speed
+
+        # ----------------------------------------------------
+        # SPEED LED
+        # ----------------------------------------------------
+
+        update_speed_led()
 
         # ----------------------------------------------------
         # STEERING
@@ -1096,6 +1310,8 @@ def run(
 
         if not throttle_armed:
 
+            # Require joystick to be in the neutral/backward
+            # region before forward motor control becomes armed.
             if (
                 y
                 <= Y_CENTER
@@ -1151,17 +1367,40 @@ def run(
                 get_y_percentage(y)
             )
 
+            if speed_change_armed:
+
+                speed_state = (
+                    "WAITING FOR RELEASE"
+                )
+
+            elif (
+                speed_change_hold_start_ms
+                is not None
+            ):
+
+                speed_state = (
+                    "HOLDING"
+                )
+
+            else:
+
+                speed_state = (
+                    "READY"
+                )
+
             log(
                 "X: {:+.1f}% | Y: {:+.1f}% | "
                 "Front: {:.3f} V | Rear: {:.3f} V | "
-                "Servo: {} | Mode: {} | Speed: {}".format(
+                "Servo: {} | Mode: {} | Speed: {} | "
+                "Speed switch: {}".format(
                     x_percent,
                     y_percent,
                     front_v,
                     rear_v,
                     servo_us,
                     mode,
-                    speed
+                    speed,
+                    speed_state
                 )
             )
 
@@ -1191,25 +1430,6 @@ def run(
 # ============================================================
 
 def self_test():
-    """
-    Run the real wheelchair control system as an interactive
-    hardware self-test.
-
-    This test DOES drive the real outputs.
-
-    It tests:
-    - steering joystick
-    - throttle joystick
-    - mode selector
-    - speed selector
-    - all four motor PWM outputs
-    - steering servo
-    - normal diagnostics
-
-    Throttle neutral arming remains active.
-
-    Press Ctrl-C to stop the test. All outputs are then stopped.
-    """
 
     print()
     print("==============================")
@@ -1222,15 +1442,33 @@ def self_test():
     )
 
     print(
-        "The joystick will control the motors and steering."
+        "The joystick controls the motors and steering."
     )
 
     print(
         "GP4 and GP7 select TERRAIN / SNOW / ROAD."
     )
 
+    print()
     print(
-        "GP20 and GP21 select LOW / MEDIUM / HIGH."
+        "Backward throttle is reserved for speed selection."
+    )
+
+    print(
+        "Pull backward past {:.0f}% and hold for {:.1f} s,"
+        " then release to neutral.".format(
+            SPEED_CHANGE_BACKWARD_FRACTION * 100,
+            SPEED_CHANGE_HOLD_MS / 1000
+        )
+    )
+
+    print(
+        "Speed sequence: LOW -> MEDIUM -> HIGH -> LOW."
+    )
+
+    print()
+    print(
+        "LED: LOW=solid, MEDIUM=slow blink, HIGH=fast blink."
     )
 
     print()
@@ -1245,7 +1483,6 @@ def self_test():
 
     print()
 
-    # Ensure we begin with outputs stopped.
     stop_outputs()
 
     try:
@@ -1275,7 +1512,6 @@ def self_test():
 
     finally:
 
-        # Always attempt to stop outputs when leaving the test.
         stop_outputs()
 
         print(
