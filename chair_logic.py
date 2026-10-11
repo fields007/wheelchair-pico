@@ -16,15 +16,13 @@ Inputs:
 - steering joystick: GP27 / ADC1
 - throttle joystick: GP28 / ADC2
 - mode selector: GP4 and GP7
+- speed selector: GP20 and GP21
 
-Speed selection:
-- The backward half of the throttle joystick is RESERVED
-  exclusively for speed selection.
-- Pull backward past the switching threshold.
-- Hold for SPEED_CHANGE_HOLD_MS.
-- Return to neutral.
-- Speed then advances:
-      LOW -> MEDIUM -> HIGH -> LOW
+Speed switch:
+    LOW:     GP20=1, GP21=0
+    MEDIUM:  GP20=1, GP21=1
+    HIGH:    GP20=0, GP21=1
+    INVALID: GP20=0, GP21=0
 
 Backward joystick movement NEVER commands the motors.
 
@@ -71,8 +69,6 @@ from time import sleep_ms, ticks_ms, ticks_diff
 
 LOOP_PERIOD_MS = 20
 
-# Print diagnostics every 10 control loops.
-# At 20 ms per loop this is approximately 5 Hz.
 DIAGNOSTIC_INTERVAL_LOOPS = 10
 
 
@@ -105,10 +101,7 @@ def get_x_percentage(x):
 
     if x < X_CENTER:
 
-        x = max(
-            x,
-            X_LEFT
-        )
+        x = max(x, X_LEFT)
 
         fraction = (
             (X_CENTER - X_DEADZONE) - x
@@ -116,19 +109,13 @@ def get_x_percentage(x):
             (X_CENTER - X_DEADZONE) - X_LEFT
         )
 
-        fraction = max(
-            0.0,
-            min(1.0, fraction)
-        )
+        fraction = max(0.0, min(1.0, fraction))
 
         return -100.0 * fraction
 
     else:
 
-        x = min(
-            x,
-            X_RIGHT
-        )
+        x = min(x, X_RIGHT)
 
         fraction = (
             x - (X_CENTER + X_DEADZONE)
@@ -136,10 +123,7 @@ def get_x_percentage(x):
             X_RIGHT - (X_CENTER + X_DEADZONE)
         )
 
-        fraction = max(
-            0.0,
-            min(1.0, fraction)
-        )
+        fraction = max(0.0, min(1.0, fraction))
 
         return 100.0 * fraction
 
@@ -149,12 +133,9 @@ def get_y_percentage(y):
     if abs(y - Y_CENTER) <= Y_DEADZONE:
         return 0.0
 
-    if y < X_CENTER:
+    if y < Y_CENTER:
 
-        y = max(
-            y,
-            Y_BACKWARD
-        )
+        y = max(y, Y_BACKWARD)
 
         fraction = (
             (Y_CENTER - Y_DEADZONE) - y
@@ -162,19 +143,13 @@ def get_y_percentage(y):
             (Y_CENTER - Y_DEADZONE) - Y_BACKWARD
         )
 
-        fraction = max(
-            0.0,
-            min(1.0, fraction)
-        )
+        fraction = max(0.0, min(1.0, fraction))
 
         return -100.0 * fraction
 
     else:
 
-        y = min(
-            y,
-            Y_FORWARD
-        )
+        y = min(y, Y_FORWARD)
 
         fraction = (
             y - (Y_CENTER + Y_DEADZONE)
@@ -182,10 +157,7 @@ def get_y_percentage(y):
             Y_FORWARD - (Y_CENTER + Y_DEADZONE)
         )
 
-        fraction = max(
-            0.0,
-            min(1.0, fraction)
-        )
+        fraction = max(0.0, min(1.0, fraction))
 
         return 100.0 * fraction
 
@@ -194,17 +166,8 @@ def get_y_percentage(y):
 # MODE SELECTOR
 # ============================================================
 
-mode_gp4 = Pin(
-    4,
-    Pin.IN,
-    Pin.PULL_UP
-)
-
-mode_gp7 = Pin(
-    7,
-    Pin.IN,
-    Pin.PULL_UP
-)
+mode_gp4 = Pin(4, Pin.IN, Pin.PULL_UP)
+mode_gp7 = Pin(7, Pin.IN, Pin.PULL_UP)
 
 current_mode = "TERRAIN"
 
@@ -228,190 +191,76 @@ def read_mode():
 
         current_mode = "ROAD"
 
-    # p4 == 0 and p7 == 0 is invalid.
-    # Retain the previous valid mode.
+    # Invalid combination retains previous mode.
 
     return current_mode
 
 
 # ============================================================
-# SPEED SELECTION USING BACKWARD JOYSTICK
+# PHYSICAL SPEED SWITCH
 # ============================================================
 
-# Speed always starts at LOW when run() begins.
+speed_gp20 = Pin(20, Pin.IN, Pin.PULL_UP)
+speed_gp21 = Pin(21, Pin.IN, Pin.PULL_UP)
+
 current_speed = "LOW"
 
-SPEED_ORDER = (
-    "LOW",
-    "MEDIUM",
-    "HIGH",
-)
 
-# A deliberate backward pull is required.
-#
-# 0.70 means the joystick must be at least 70% of the way
-# from neutral to the calibrated full-backward position.
-#
-# The entire backward side remains unavailable to the motors,
-# regardless of this threshold.
-SPEED_CHANGE_BACKWARD_FRACTION = 0.70
+def read_speed():
 
-# Backward position must be held for this long before it becomes
-# an armed speed-change request.
-SPEED_CHANGE_HOLD_MS = 500
+    """
+    Read the physical three-position speed switch.
 
-# After the hold succeeds, the joystick must return into the
-# ordinary throttle neutral region before the speed changes.
-#
-# This gives us a deliberate:
-#
-#     pull -> hold -> release
-#
-# gesture rather than changing speed merely by crossing a point.
-SPEED_CHANGE_NEUTRAL_LIMIT = (
-    Y_CENTER - Y_DEADZONE
-)
+    LOW:
+        GP20 = 1
+        GP21 = 0
 
-SPEED_CHANGE_BACKWARD_THRESHOLD = int(
-    Y_CENTER
-    - SPEED_CHANGE_BACKWARD_FRACTION
-    * (
-        Y_CENTER
-        - Y_BACKWARD
-    )
-)
+    MEDIUM:
+        GP20 = 1
+        GP21 = 1
 
-speed_change_hold_start_ms = None
-speed_change_armed = False
+    HIGH:
+        GP20 = 0
+        GP21 = 1
 
+    INVALID:
+        GP20 = 0
+        GP21 = 0
 
-def reset_speed_change_state():
-
-    global speed_change_hold_start_ms
-    global speed_change_armed
-
-    speed_change_hold_start_ms = None
-    speed_change_armed = False
-
-
-def advance_speed():
+    Invalid combination defaults to LOW.
+    """
 
     global current_speed
 
-    index = SPEED_ORDER.index(
-        current_speed
-    )
+    p20 = speed_gp20.value()
+    p21 = speed_gp21.value()
 
-    index = (
-        index + 1
-    ) % len(
-        SPEED_ORDER
-    )
+    if p20 == 1 and p21 == 0:
 
-    current_speed = SPEED_ORDER[
-        index
-    ]
+        current_speed = "LOW"
+
+    elif p20 == 1 and p21 == 1:
+
+        current_speed = "MEDIUM"
+
+    elif p20 == 0 and p21 == 1:
+
+        current_speed = "HIGH"
+
+    else:
+
+        current_speed = "LOW"
 
     return current_speed
-
-
-def update_speed_selection(y):
-
-    """
-    Handle deliberate speed changes using backward joystick travel.
-
-    Sequence:
-
-        1. Pull backward beyond SPEED_CHANGE_BACKWARD_THRESHOLD.
-        2. Hold for SPEED_CHANGE_HOLD_MS.
-        3. Return to neutral.
-        4. Speed advances one step.
-
-    Pulling backward briefly does nothing.
-
-    Holding backward indefinitely changes nothing until the
-    joystick is released.
-
-    After a speed change, another complete pull-hold-release
-    gesture is required.
-    """
-
-    global speed_change_hold_start_ms
-    global speed_change_armed
-
-    now = ticks_ms()
-
-    # --------------------------------------------------------
-    # ALREADY ARMED
-    # --------------------------------------------------------
-
-    if speed_change_armed:
-
-        # Wait for joystick to return to the neutral region.
-        if y >= SPEED_CHANGE_NEUTRAL_LIMIT:
-
-            new_speed = advance_speed()
-
-            speed_change_armed = False
-            speed_change_hold_start_ms = None
-
-            return new_speed
-
-        return None
-
-    # --------------------------------------------------------
-    # BACKWARD PULL
-    # --------------------------------------------------------
-
-    if y <= SPEED_CHANGE_BACKWARD_THRESHOLD:
-
-        if speed_change_hold_start_ms is None:
-
-            speed_change_hold_start_ms = now
-
-        elif (
-            ticks_diff(
-                now,
-                speed_change_hold_start_ms
-            )
-            >= SPEED_CHANGE_HOLD_MS
-        ):
-
-            # Gesture is now armed.
-            #
-            # Do NOT change speed yet.
-            # Require release to neutral first.
-            speed_change_armed = True
-
-        return None
-
-    # --------------------------------------------------------
-    # PULL ABORTED BEFORE HOLD COMPLETED
-    # --------------------------------------------------------
-
-    speed_change_hold_start_ms = None
-
-    return None
 
 
 # ============================================================
 # STATUS / SPEED LED
 # ============================================================
 
-# main.py may use this LED while starting Wi-Fi / maintenance.
-# Once run() starts, chair_logic owns it for speed indication.
+status_led = Pin(2, Pin.OUT)
 
-status_led = Pin(
-    2,
-    Pin.OUT
-)
-
-# MEDIUM:
-# 500 ms ON / 500 ms OFF
 MEDIUM_LED_HALF_PERIOD_MS = 500
-
-# HIGH:
-# 125 ms ON / 125 ms OFF
 HIGH_LED_HALF_PERIOD_MS = 125
 
 led_last_toggle_ms = ticks_ms()
@@ -443,10 +292,6 @@ def update_speed_led():
 
     now = ticks_ms()
 
-    # --------------------------------------------------------
-    # LOW = SOLID ON
-    # --------------------------------------------------------
-
     if current_speed == "LOW":
 
         if not led_state:
@@ -458,40 +303,19 @@ def update_speed_led():
 
         return
 
-    # --------------------------------------------------------
-    # SELECT BLINK RATE
-    # --------------------------------------------------------
-
     if current_speed == "MEDIUM":
 
-        half_period_ms = (
-            MEDIUM_LED_HALF_PERIOD_MS
-        )
+        half_period_ms = MEDIUM_LED_HALF_PERIOD_MS
 
     else:
 
-        # HIGH
-        half_period_ms = (
-            HIGH_LED_HALF_PERIOD_MS
-        )
+        half_period_ms = HIGH_LED_HALF_PERIOD_MS
 
-    # --------------------------------------------------------
-    # BLINK
-    # --------------------------------------------------------
-
-    if (
-        ticks_diff(
-            now,
-            led_last_toggle_ms
-        )
-        >= half_period_ms
-    ):
+    if ticks_diff(now, led_last_toggle_ms) >= half_period_ms:
 
         led_state = not led_state
 
-        status_led.value(
-            1 if led_state else 0
-        )
+        status_led.value(1 if led_state else 0)
 
         led_last_toggle_ms = now
 
@@ -536,9 +360,7 @@ MOTOR_SLEW_ACCELERATION_V = 0.00005
 
 motor_current_v = 0.0
 
-motor_accel_step_v = (
-    MOTOR_START_SLEW_STEP_V
-)
+motor_accel_step_v = MOTOR_START_SLEW_STEP_V
 
 
 # ============================================================
@@ -548,21 +370,10 @@ motor_accel_step_v = (
 PICO_PWM_VOLTAGE = 3.3
 MOTOR_PWM_FREQUENCY = 20000
 
-motor_BR = PWM(
-    Pin(17)
-)
-
-motor_BL = PWM(
-    Pin(18)
-)
-
-motor_FR = PWM(
-    Pin(14)
-)
-
-motor_FL = PWM(
-    Pin(15)
-)
+motor_BR = PWM(Pin(17))
+motor_BL = PWM(Pin(18))
+motor_FR = PWM(Pin(14))
+motor_FL = PWM(Pin(15))
 
 REAR_MOTOR_PWMS = (
     motor_BR,
@@ -583,10 +394,7 @@ MOTOR_PWMS = (
 
 for pwm in MOTOR_PWMS:
 
-    pwm.freq(
-        MOTOR_PWM_FREQUENCY
-    )
-
+    pwm.freq(MOTOR_PWM_FREQUENCY)
     pwm.duty_u16(0)
 
 
@@ -594,25 +402,17 @@ def voltage_to_duty(voltage):
 
     voltage = max(
         0.0,
-        min(
-            PICO_PWM_VOLTAGE,
-            voltage
-        )
+        min(PICO_PWM_VOLTAGE, voltage)
     )
 
     return int(
         round(
-            voltage
-            / PICO_PWM_VOLTAGE
-            * 65535
+            voltage / PICO_PWM_VOLTAGE * 65535
         )
     )
 
 
-def set_motor_voltages(
-    front_voltage,
-    rear_voltage
-):
+def set_motor_voltages(front_voltage, rear_voltage):
 
     if front_voltage < MIN_MOTOR_VOLTAGE:
         front_voltage = 0.0
@@ -630,33 +430,19 @@ def set_motor_voltages(
         rear_voltage
     )
 
-    front_duty = voltage_to_duty(
-        front_voltage
-    )
-
-    rear_duty = voltage_to_duty(
-        rear_voltage
-    )
+    front_duty = voltage_to_duty(front_voltage)
+    rear_duty = voltage_to_duty(rear_voltage)
 
     for pwm in FRONT_MOTOR_PWMS:
-
-        pwm.duty_u16(
-            front_duty
-        )
+        pwm.duty_u16(front_duty)
 
     for pwm in REAR_MOTOR_PWMS:
-
-        pwm.duty_u16(
-            rear_duty
-        )
+        pwm.duty_u16(rear_duty)
 
 
 def set_all_motor_voltage(voltage):
 
-    set_motor_voltages(
-        voltage,
-        voltage
-    )
+    set_motor_voltages(voltage, voltage)
 
 
 # ============================================================
@@ -665,18 +451,9 @@ def set_all_motor_voltage(voltage):
 
 def get_throttle_fraction(y):
 
-    # IMPORTANT:
-    #
-    # Anything at or below the forward edge of neutral produces
-    # ZERO motor command.
-    #
-    # Therefore the entire backward joystick range is reserved
-    # for speed selection and can never command the motors.
+    # Backward joystick movement never commands motors.
 
-    throttle_start = (
-        Y_CENTER
-        + Y_DEADZONE
-    )
+    throttle_start = Y_CENTER + Y_DEADZONE
 
     if y <= throttle_start:
         return 0.0
@@ -686,25 +463,13 @@ def get_throttle_fraction(y):
 
     fraction = (
         (y - throttle_start)
-        / (
-            Y_FORWARD_FULL
-            - throttle_start
-        )
+        / (Y_FORWARD_FULL - throttle_start)
     )
 
-    return max(
-        0.0,
-        min(
-            1.0,
-            fraction
-        )
-    )
+    return max(0.0, min(1.0, fraction))
 
 
-def get_front_max_voltage(
-    mode,
-    speed
-):
+def get_front_max_voltage(mode, speed):
 
     if mode == "TERRAIN":
 
@@ -712,24 +477,14 @@ def get_front_max_voltage(
 
     if mode == "SNOW":
 
-        return SNOW_MAX_VOLTAGE[
-            speed
-        ]
+        return SNOW_MAX_VOLTAGE[speed]
 
-    return ROAD_MAX_VOLTAGE[
-        speed
-    ]
+    return ROAD_MAX_VOLTAGE[speed]
 
 
-def joystick_to_motor_voltage(
-    y,
-    mode,
-    speed
-):
+def joystick_to_motor_voltage(y, mode, speed):
 
-    throttle = get_throttle_fraction(
-        y
-    )
+    throttle = get_throttle_fraction(y)
 
     if throttle <= 0.0:
         return 0.0
@@ -737,42 +492,23 @@ def joystick_to_motor_voltage(
     if throttle <= MIN_VOLTAGE_REGION:
         return MIN_MOTOR_VOLTAGE
 
-    max_v = get_front_max_voltage(
-        mode,
-        speed
-    )
+    max_v = get_front_max_voltage(mode, speed)
 
     remaining_fraction = (
-        (
-            throttle
-            - MIN_VOLTAGE_REGION
-        )
-        / (
-            1.0
-            - MIN_VOLTAGE_REGION
-        )
+        (throttle - MIN_VOLTAGE_REGION)
+        / (1.0 - MIN_VOLTAGE_REGION)
     )
 
     remaining_fraction = max(
         0.0,
-        min(
-            1.0,
-            remaining_fraction
-        )
+        min(1.0, remaining_fraction)
     )
 
-    shaped = (
-        remaining_fraction
-        ** THROTTLE_EXPONENT
-    )
+    shaped = remaining_fraction ** THROTTLE_EXPONENT
 
     return (
         MIN_MOTOR_VOLTAGE
-        + shaped
-        * (
-            max_v
-            - MIN_MOTOR_VOLTAGE
-        )
+        + shaped * (max_v - MIN_MOTOR_VOLTAGE)
     )
 
 
@@ -780,11 +516,7 @@ def joystick_to_motor_voltage(
 # FRONT / REAR MOTOR COMMANDS
 # ============================================================
 
-def get_rear_voltage(
-    front_voltage,
-    mode,
-    speed
-):
+def get_rear_voltage(front_voltage, mode, speed):
 
     if front_voltage <= 0.0:
         return 0.0
@@ -792,16 +524,9 @@ def get_rear_voltage(
     if mode != "TERRAIN":
         return front_voltage
 
-    multiplier = (
-        TERRAIN_REAR_MULTIPLIER[
-            speed
-        ]
-    )
+    multiplier = TERRAIN_REAR_MULTIPLIER[speed]
 
-    rear_voltage = (
-        front_voltage
-        * multiplier
-    )
+    rear_voltage = front_voltage * multiplier
 
     return min(
         PICO_PWM_VOLTAGE,
@@ -813,11 +538,7 @@ def get_rear_voltage(
 # MOTOR SLEW / SLOW START
 # ============================================================
 
-def update_motor_voltage(
-    target_v,
-    mode,
-    speed
-):
+def update_motor_voltage(target_v, mode, speed):
 
     global motor_current_v
     global motor_accel_step_v
@@ -826,45 +547,28 @@ def update_motor_voltage(
 
         motor_current_v = 0.0
 
-        motor_accel_step_v = (
-            MOTOR_START_SLEW_STEP_V
-        )
+        motor_accel_step_v = MOTOR_START_SLEW_STEP_V
 
-        set_motor_voltages(
-            0.0,
-            0.0
-        )
+        set_motor_voltages(0.0, 0.0)
 
-        return (
-            0.0,
-            0.0
-        )
+        return (0.0, 0.0)
 
     if motor_current_v <= 0.0:
 
-        motor_current_v = (
-            MIN_MOTOR_VOLTAGE
-        )
+        motor_current_v = MIN_MOTOR_VOLTAGE
 
-        motor_accel_step_v = (
-            MOTOR_START_SLEW_STEP_V
-        )
+        motor_accel_step_v = MOTOR_START_SLEW_STEP_V
 
     elif motor_current_v < target_v:
 
-        difference = (
-            target_v
-            - motor_current_v
-        )
+        difference = target_v - motor_current_v
 
         motor_current_v += min(
             motor_accel_step_v,
             difference
         )
 
-        motor_accel_step_v += (
-            MOTOR_SLEW_ACCELERATION_V
-        )
+        motor_accel_step_v += MOTOR_SLEW_ACCELERATION_V
 
         motor_accel_step_v = min(
             motor_accel_step_v,
@@ -873,10 +577,7 @@ def update_motor_voltage(
 
     elif motor_current_v > target_v:
 
-        difference = (
-            motor_current_v
-            - target_v
-        )
+        difference = motor_current_v - target_v
 
         motor_current_v -= min(
             MOTOR_MAX_SLEW_STEP_V,
@@ -885,15 +586,10 @@ def update_motor_voltage(
 
     motor_current_v = max(
         0.0,
-        min(
-            PICO_PWM_VOLTAGE,
-            motor_current_v
-        )
+        min(PICO_PWM_VOLTAGE, motor_current_v)
     )
 
-    front_voltage = (
-        motor_current_v
-    )
+    front_voltage = motor_current_v
 
     rear_voltage = get_rear_voltage(
         front_voltage,
@@ -906,20 +602,14 @@ def update_motor_voltage(
         rear_voltage
     )
 
-    return (
-        front_voltage,
-        rear_voltage
-    )
+    return (front_voltage, rear_voltage)
 
 
 # ============================================================
 # STEERING SERVO
 # ============================================================
 
-servo = PWM(
-    Pin(10)
-)
-
+servo = PWM(Pin(10))
 servo.freq(50)
 
 SERVO_LEFT = 1100
@@ -957,21 +647,14 @@ def set_servo_us(pulse_us):
 
     pulse_us = max(
         SERVO_LEFT,
-        min(
-            SERVO_RIGHT,
-            pulse_us
-        )
+        min(SERVO_RIGHT, pulse_us)
     )
 
     duty = int(
-        pulse_us
-        * 65535
-        / 20000
+        pulse_us * 65535 / 20000
     )
 
-    servo.duty_u16(
-        duty
-    )
+    servo.duty_u16(duty)
 
     servo_enabled = True
 
@@ -987,95 +670,54 @@ def disable_servo():
 
 def joystick_to_servo(x):
 
-    if abs(
-        x - X_CENTER
-    ) <= X_DEADZONE:
+    if abs(x - X_CENTER) <= X_DEADZONE:
 
         return SERVO_CENTER
 
     if x < X_CENTER:
 
-        x = max(
-            x,
-            X_LEFT
-        )
+        x = max(x, X_LEFT)
 
         fraction = (
-            X_CENTER
-            - X_DEADZONE
-            - x
+            X_CENTER - X_DEADZONE - x
         ) / (
-            X_CENTER
-            - X_DEADZONE
-            - X_LEFT
+            X_CENTER - X_DEADZONE - X_LEFT
         )
 
         fraction = max(
             0.0,
-            min(
-                1.0,
-                fraction
-            )
+            min(1.0, fraction)
         )
 
         pulse = (
             SERVO_CENTER
-            - fraction
-            * (
-                SERVO_CENTER
-                - SERVO_LEFT
-            )
+            - fraction * (SERVO_CENTER - SERVO_LEFT)
         )
 
     else:
 
-        x = min(
-            x,
-            X_RIGHT
-        )
+        x = min(x, X_RIGHT)
 
         fraction = (
-            x
-            - (
-                X_CENTER
-                + X_DEADZONE
-            )
+            x - (X_CENTER + X_DEADZONE)
         ) / (
-            X_RIGHT
-            - (
-                X_CENTER
-                + X_DEADZONE
-            )
+            X_RIGHT - (X_CENTER + X_DEADZONE)
         )
 
         fraction = max(
             0.0,
-            min(
-                1.0,
-                fraction
-            )
+            min(1.0, fraction)
         )
 
         pulse = (
             SERVO_CENTER
-            + fraction
-            * (
-                SERVO_RIGHT
-                - SERVO_CENTER
-            )
+            + fraction * (SERVO_RIGHT - SERVO_CENTER)
         )
 
-    return int(
-        pulse
-    )
+    return int(pulse)
 
 
-def update_servo(
-    target_us,
-    mode,
-    speed,
-    joystick_x
-):
+def update_servo(target_us, mode, speed, joystick_x):
 
     global servo_current_us
     global servo_last_active_ms
@@ -1083,27 +725,15 @@ def update_servo(
     now = ticks_ms()
 
     joystick_active = (
-        abs(
-            joystick_x
-            - X_CENTER
-        )
-        > X_DEADZONE
+        abs(joystick_x - X_CENTER) > X_DEADZONE
     )
 
     if joystick_active:
-
         servo_last_active_ms = now
 
-    max_step = STEERING_STEP_US[
-        mode
-    ][
-        speed
-    ]
+    max_step = STEERING_STEP_US[mode][speed]
 
-    difference = (
-        target_us
-        - servo_current_us
-    )
+    difference = target_us - servo_current_us
 
     if difference > max_step:
 
@@ -1119,30 +749,20 @@ def update_servo(
 
     if (
         not joystick_active
-        and
-        servo_current_us
-        == SERVO_CENTER
-        and
-        ticks_diff(
+        and servo_current_us == SERVO_CENTER
+        and ticks_diff(
             now,
             servo_last_active_ms
-        )
-        >= SERVO_RELEASE_DELAY_MS
+        ) >= SERVO_RELEASE_DELAY_MS
     ):
 
         disable_servo()
 
-        return int(
-            servo_current_us
-        )
+        return int(servo_current_us)
 
-    set_servo_us(
-        servo_current_us
-    )
+    set_servo_us(servo_current_us)
 
-    return int(
-        servo_current_us
-    )
+    return int(servo_current_us)
 
 
 # ============================================================
@@ -1156,12 +776,9 @@ def stop_outputs():
 
     motor_current_v = 0.0
 
-    motor_accel_step_v = (
-        MOTOR_START_SLEW_STEP_V
-    )
+    motor_accel_step_v = MOTOR_START_SLEW_STEP_V
 
     for pwm in MOTOR_PWMS:
-
         pwm.duty_u16(0)
 
     disable_servo()
@@ -1171,18 +788,13 @@ def stop_outputs():
 # MAIN CONTROL LOOP
 # ============================================================
 
-def run(
-    stop_requested=None,
-    log=print
-):
+def run(stop_requested=None, log=print):
 
     global servo_current_us
     global servo_last_active_ms
     global motor_current_v
     global motor_accel_step_v
     global current_speed
-    global speed_change_hold_start_ms
-    global speed_change_armed
 
     # --------------------------------------------------------
     # RESET CONTROL STATE
@@ -1190,34 +802,20 @@ def run(
 
     motor_current_v = 0.0
 
-    motor_accel_step_v = (
-        MOTOR_START_SLEW_STEP_V
-    )
+    motor_accel_step_v = MOTOR_START_SLEW_STEP_V
 
-    set_motor_voltages(
-        0.0,
-        0.0
-    )
+    set_motor_voltages(0.0, 0.0)
 
-    servo_current_us = (
-        SERVO_CENTER
-    )
+    servo_current_us = SERVO_CENTER
 
-    set_servo_us(
-        SERVO_CENTER
-    )
+    set_servo_us(SERVO_CENTER)
 
-    servo_last_active_ms = (
-        ticks_ms()
-    )
+    servo_last_active_ms = ticks_ms()
 
     mode = read_mode()
 
-    # Always begin normal chair operation at LOW speed.
-    current_speed = "LOW"
-
-    speed_change_hold_start_ms = None
-    speed_change_armed = False
+    # Read actual physical speed switch at startup.
+    speed = read_speed()
 
     initialise_speed_led()
 
@@ -1226,7 +824,9 @@ def run(
     diagnostic_counter = 0
 
     log(
-        "Chair control started. Speed: LOW"
+        "Chair control started. Speed: {}".format(
+            speed
+        )
     )
 
     # --------------------------------------------------------
@@ -1243,16 +843,13 @@ def run(
 
         if (
             stop_requested is not None
-            and
-            stop_requested()
+            and stop_requested()
         ):
 
             stop_outputs()
 
             log("")
-            log(
-                "Chair control stopped."
-            )
+            log("Chair control stopped.")
 
             return
 
@@ -1266,22 +863,20 @@ def run(
         mode = read_mode()
 
         # ----------------------------------------------------
-        # SPEED SELECTION
+        # PHYSICAL SPEED SWITCH
         # ----------------------------------------------------
 
-        changed_speed = (
-            update_speed_selection(y)
-        )
+        previous_speed = current_speed
 
-        if changed_speed is not None:
+        speed = read_speed()
+
+        if speed != previous_speed:
 
             log(
                 "Speed changed to: {}".format(
-                    changed_speed
+                    speed
                 )
             )
-
-        speed = current_speed
 
         # ----------------------------------------------------
         # SPEED LED
@@ -1293,9 +888,7 @@ def run(
         # STEERING
         # ----------------------------------------------------
 
-        servo_target = (
-            joystick_to_servo(x)
-        )
+        servo_target = joystick_to_servo(x)
 
         servo_us = update_servo(
             servo_target,
@@ -1310,13 +903,7 @@ def run(
 
         if not throttle_armed:
 
-            # Require joystick to be in the neutral/backward
-            # region before forward motor control becomes armed.
-            if (
-                y
-                <= Y_CENTER
-                + Y_DEADZONE
-            ):
+            if y <= Y_CENTER + Y_DEADZONE:
 
                 throttle_armed = True
 
@@ -1326,24 +913,20 @@ def run(
 
         if throttle_armed:
 
-            motor_target_v = (
-                joystick_to_motor_voltage(
-                    y,
-                    mode,
-                    speed
-                )
+            motor_target_v = joystick_to_motor_voltage(
+                y,
+                mode,
+                speed
             )
 
         else:
 
             motor_target_v = 0.0
 
-        front_v, rear_v = (
-            update_motor_voltage(
-                motor_target_v,
-                mode,
-                speed
-            )
+        front_v, rear_v = update_motor_voltage(
+            motor_target_v,
+            mode,
+            speed
         )
 
         # ----------------------------------------------------
@@ -1352,46 +935,17 @@ def run(
 
         diagnostic_counter += 1
 
-        if (
-            diagnostic_counter
-            >= DIAGNOSTIC_INTERVAL_LOOPS
-        ):
+        if diagnostic_counter >= DIAGNOSTIC_INTERVAL_LOOPS:
 
             diagnostic_counter = 0
 
-            x_percent = (
-                get_x_percentage(x)
-            )
-
-            y_percent = (
-                get_y_percentage(y)
-            )
-
-            if speed_change_armed:
-
-                speed_state = (
-                    "WAITING FOR RELEASE"
-                )
-
-            elif (
-                speed_change_hold_start_ms
-                is not None
-            ):
-
-                speed_state = (
-                    "HOLDING"
-                )
-
-            else:
-
-                speed_state = (
-                    "READY"
-                )
+            x_percent = get_x_percentage(x)
+            y_percent = get_y_percentage(y)
 
             log(
                 "X: {:+.1f}% | Y: {:+.1f}% | "
                 "Front: {:.3f} V | Rear: {:.3f} V | "
-                "Servo: {} | Mode: {} | Speed: {} | "
+                "Servo: {} | Mode: {} | "
                 "Speed switch: {}".format(
                     x_percent,
                     y_percent,
@@ -1399,8 +953,7 @@ def run(
                     rear_v,
                     servo_us,
                     mode,
-                    speed,
-                    speed_state
+                    speed
                 )
             )
 
@@ -1413,16 +966,10 @@ def run(
             loop_start
         )
 
-        remaining = (
-            LOOP_PERIOD_MS
-            - elapsed
-        )
+        remaining = LOOP_PERIOD_MS - elapsed
 
         if remaining > 0:
-
-            sleep_ms(
-                remaining
-            )
+            sleep_ms(remaining)
 
 
 # ============================================================
@@ -1451,19 +998,12 @@ def self_test():
 
     print()
     print(
-        "Backward throttle is reserved for speed selection."
+        "GP20 and GP21 select LOW / MEDIUM / HIGH."
     )
 
+    print()
     print(
-        "Pull backward past {:.0f}% and hold for {:.1f} s,"
-        " then release to neutral.".format(
-            SPEED_CHANGE_BACKWARD_FRACTION * 100,
-            SPEED_CHANGE_HOLD_MS / 1000
-        )
-    )
-
-    print(
-        "Speed sequence: LOW -> MEDIUM -> HIGH -> LOW."
+        "Backward throttle movement does not drive motors."
     )
 
     print()
