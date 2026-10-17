@@ -3,113 +3,80 @@ Wheelchair supervisor.
 
 NORMAL OPERATION
 ----------------
-The wheelchair starts immediately and operates without requiring
-Wi-Fi or MQTT.
+Wheelchair control starts without requiring Wi-Fi or MQTT.
 
 NETWORK CONNECTION
 ------------------
-Press GP9 to request an Internet connection.
+Press GP26 to request a network connection.
 
-When GP9 is pressed:
-    1. Wheelchair outputs are stopped.
-    2. GP2 LED turns on continuously.
-    3. Wi-Fi connection is attempted.
-    4. MQTT connection is attempted.
-    5. Five quick flashes indicate success.
-    6. Three slow flashes indicate failure.
-    7. Wheelchair control resumes.
+The supervisor:
+    1. Stops wheelchair control.
+    2. Displays CONNECTING on the OLED.
+    3. Attempts Wi-Fi connection once.
+    4. Attempts MQTT connection once.
+    5. Displays the result for five seconds.
+    6. Resumes wheelchair control.
 
-After a remotely requested reboot, successful update or
-successful rollback, the supervisor automatically attempts to
-reconnect to Wi-Fi and MQTT once.
+NETWORK STATUS
+--------------
+OFFLINE
+CONNECTING
+WIFI OK
+MQTT CONNECT
+CONNECTED
+WIFI FAILED
+MQTT FAILED
+RECOVERY
+STOPPED
+ERROR
 
-A normal power-on or unrelated reboot does NOT automatically
-connect.
+OLED
+----
+Main messages use the standard 8x8 font.
 
-When MQTT is connected:
-- live chair diagnostics can be sent remotely
-- remote commands are received
+Secondary messages use a smaller 3x5 bitmap font.
 
-If networking is later lost, wheelchair operation continues.
-Press GP9 again to reconnect.
+Text is centered horizontally and vertically.
+
+Long messages wrap automatically.
+
+Successful connection display:
+
+    Connected to
+    [Wi-Fi SSID]
+
+    WiFi + MQTT OK
 
 REMOTE COMMANDS
 ---------------
-Supported commands:
+status
+check-update
+update
+rollback
+reboot
+logs-on
+logs-off
+add-wifi|SSID|PASSWORD
 
-    status
-    check-update
-    update
-    rollback
-    reboot
-    logs-on
-    logs-off
-    add-wifi|SSID|PASSWORD
+GPIO
+----
+GP26: Wi-Fi connection button, active LOW
+GP20: OLED SDA
+GP21: OLED SCL
 
-Update, rollback and reboot always stop chair control first.
+No status LED is used.
 
-REMOTE TELEMETRY
-----------------
-The commands:
+IMPORTANT
+---------
+The supervisor assumes chair_logic.stop_outputs() safely
+disables wheelchair movement before network operations.
 
-    logs-off
-
-and:
-
-    logs-on
-
-disable and enable only the continuous chair telemetry sent
-through MQTT.
-
-Local USB / REPL chair diagnostics continue regardless.
-
-Important supervisor event messages are still sent remotely
-during normal connected operation.
-
-Remote telemetry defaults to ON after every reboot.
-
-LOGGING
--------
-Normal chair diagnostics:
-- printed over USB / REPL
-- latest message queued for MQTT when remote telemetry is ON
-- NOT continuously written to flash
-
-Normal important supervisor events:
-- printed over USB / REPL
-- written to maintenance.log
-- queued for MQTT
-
-Update / rollback progress:
-- printed over USB / REPL
-- written to maintenance.log
-- NOT queued for MQTT
-
-This is deliberate because update/rollback is followed by a
-reboot and queued MQTT messages cannot be guaranteed to be sent.
-
-After the reboot and successful automatic reconnection, a new
-confirmation message is sent remotely.
-
-RECOVERY
---------
-If chair_logic.py cannot be imported or crashes, outputs are
-stopped and the supervisor enters recovery mode.
-
-GP9 can then be used to establish networking, allowing remote
-rollback, update, status and reboot commands.
-
-If recovery mode is entered immediately after a remotely
-requested reboot/update/rollback, the one-shot automatic
-network connection is still attempted.
+Network connection operations are blocking and must only
+run while chair outputs are stopped.
 """
 
-from machine import Pin
-from time import (
-    sleep_ms,
-    ticks_ms,
-    ticks_diff
-)
+from machine import Pin, I2C
+from time import sleep_ms, ticks_ms, ticks_diff
 
 import machine
 import sys
@@ -127,51 +94,674 @@ import system.updater as updater
 
 LOG_FILE = "maintenance.log"
 
-# One-shot file used to request automatic network reconnection
-# after a remotely requested reset.
-#
-# Its contents describe why the reset occurred:
-#
-#     reboot
-#     update
-#     rollback
-#
 RECONNECT_FILE = "reconnect_after_reboot.flag"
 
 MQTT_SERVICE_INTERVAL_MS = 200
 
+CONNECTION_RESULT_DISPLAY_MS = 5000
+
+EVENT_QUEUE_LIMIT = 20
+
+pending_events = []
 pending_telemetry = None
 
 remote_telemetry_enabled = True
-
-EVENT_QUEUE_LIMIT = 20
-pending_events = []
 
 
 # ============================================================
 # HARDWARE
 # ============================================================
 
-# GP9 ---- button ---- GND
-#
-# released = 1
-# pressed  = 0
+# GP26 ---- button ---- GND
 
 connection_button = Pin(
-    9,
+    26,
     Pin.IN,
     Pin.PULL_UP
 )
 
 
-# GP2 status LED.
+# ============================================================
+# OLED SETTINGS
+# ============================================================
 
-led = Pin(
-    2,
-    Pin.OUT
-)
+OLED_WIDTH = 128
+OLED_HEIGHT = 64
 
-led.value(0)
+OLED_ADDRESS = 0x3C
+
+OLED_SDA = 20
+OLED_SCL = 21
+
+OLED_I2C_FREQUENCY = 100000
+
+# Standard font
+
+OLED_CHAR_WIDTH = 8
+OLED_CHAR_HEIGHT = 8
+
+# Smaller font
+
+SMALL_CHAR_WIDTH = 3
+SMALL_CHAR_HEIGHT = 5
+SMALL_CHAR_SPACING = 1
+
+# Keep text away from screen edges
+
+OLED_MARGIN_X = 20
+OLED_MARGIN_Y = 5
+
+# Main text maximum width
+
+OLED_MAX_CHARS = 10
+
+# Spacing between main lines
+
+OLED_LINE_SPACING = 4
+
+# Spacing before secondary information
+
+OLED_SECTION_SPACING = 7
+
+oled = None
+
+oled_status = "OFFLINE"
+oled_detail = ""
+
+
+# ============================================================
+# SMALL BITMAP FONT
+# ============================================================
+
+# Each character consists of three columns and five rows.
+#
+# The characters are stored as five strings.
+# Each string represents one horizontal row.
+#
+# 1 = illuminated pixel
+# 0 = unilluminated pixel
+#
+# This font is independent of the SSD1306 driver.
+
+SMALL_FONT = {
+
+    "A": ("010", "101", "111", "101", "101"),
+    "B": ("110", "101", "110", "101", "110"),
+    "C": ("011", "100", "100", "100", "011"),
+    "D": ("110", "101", "101", "101", "110"),
+    "E": ("111", "100", "110", "100", "111"),
+    "F": ("111", "100", "110", "100", "100"),
+    "G": ("011", "100", "101", "101", "011"),
+    "H": ("101", "101", "111", "101", "101"),
+    "I": ("111", "010", "010", "010", "111"),
+    "J": ("001", "001", "001", "101", "010"),
+    "K": ("101", "101", "110", "101", "101"),
+    "L": ("100", "100", "100", "100", "111"),
+    "M": ("101", "111", "111", "101", "101"),
+    "N": ("101", "111", "111", "111", "101"),
+    "O": ("010", "101", "101", "101", "010"),
+    "P": ("110", "101", "110", "100", "100"),
+    "Q": ("010", "101", "101", "111", "011"),
+    "R": ("110", "101", "110", "101", "101"),
+    "S": ("011", "100", "010", "001", "110"),
+    "T": ("111", "010", "010", "010", "010"),
+    "U": ("101", "101", "101", "101", "111"),
+    "V": ("101", "101", "101", "101", "010"),
+    "W": ("101", "101", "111", "111", "101"),
+    "X": ("101", "101", "010", "101", "101"),
+    "Y": ("101", "101", "010", "010", "010"),
+    "Z": ("111", "001", "010", "100", "111"),
+
+    "0": ("111", "101", "101", "101", "111"),
+    "1": ("010", "110", "010", "010", "111"),
+    "2": ("110", "001", "010", "100", "111"),
+    "3": ("110", "001", "010", "001", "110"),
+    "4": ("101", "101", "111", "001", "001"),
+    "5": ("111", "100", "110", "001", "110"),
+    "6": ("011", "100", "110", "101", "010"),
+    "7": ("111", "001", "010", "010", "010"),
+    "8": ("010", "101", "010", "101", "010"),
+    "9": ("010", "101", "011", "001", "110"),
+
+    " ": ("000", "000", "000", "000", "000"),
+    ".": ("000", "000", "000", "000", "010"),
+    ":": ("000", "010", "000", "010", "000"),
+    "-": ("000", "000", "111", "000", "000"),
+    "+": ("000", "010", "111", "010", "000"),
+    "/": ("001", "001", "010", "100", "100"),
+    "_": ("000", "000", "000", "000", "111"),
+    "!": ("010", "010", "010", "000", "010"),
+    "?": ("110", "001", "010", "000", "010"),
+    "(": ("001", "010", "010", "010", "001"),
+    ")": ("100", "010", "010", "010", "100"),
+    "=": ("000", "111", "000", "111", "000"),
+    "&": ("010", "101", "010", "101", "011"),
+    "'": ("010", "010", "000", "000", "000"),
+}
+
+
+# ============================================================
+# OLED INITIALIZATION
+# ============================================================
+
+def initialize_oled():
+
+    global oled
+
+    try:
+        import ssd1306
+
+        i2c = I2C(
+            0,
+            sda=Pin(OLED_SDA),
+            scl=Pin(OLED_SCL),
+            freq=OLED_I2C_FREQUENCY
+        )
+
+        devices = i2c.scan()
+
+        if OLED_ADDRESS not in devices:
+            print("OLED not detected.")
+            oled = None
+            return False
+
+        oled = ssd1306.SSD1306_I2C(
+            OLED_WIDTH,
+            OLED_HEIGHT,
+            i2c,
+            addr=OLED_ADDRESS,
+            chunk_size=16
+        )
+
+        print("OLED initialized.")
+
+        return True
+
+    except Exception as error:
+
+        print(
+            "OLED initialization failed:",
+            error
+        )
+
+        oled = None
+        return False
+
+
+# ============================================================
+# OLED TEXT WRAPPING
+# ============================================================
+
+def wrap_oled_text(text):
+
+    """
+    Wrap standard-size text into lines.
+
+    Prefer splitting at spaces.
+
+    Long words are split into segments.
+    """
+
+    text = str(text).strip()
+
+    if not text:
+        return []
+
+    lines = []
+
+    words = text.split()
+
+    current_line = ""
+
+    for word in words:
+
+        while len(word) > OLED_MAX_CHARS:
+
+            if current_line:
+
+                lines.append(current_line)
+                current_line = ""
+
+            lines.append(
+                word[:OLED_MAX_CHARS]
+            )
+
+            word = word[OLED_MAX_CHARS:]
+
+        if not word:
+            continue
+
+        if not current_line:
+
+            current_line = word
+
+        elif (
+            len(current_line) + 1 + len(word)
+            <= OLED_MAX_CHARS
+        ):
+
+            current_line += " " + word
+
+        else:
+
+            lines.append(current_line)
+            current_line = word
+
+    if current_line:
+        lines.append(current_line)
+
+    return lines
+
+
+# ============================================================
+# OLED STANDARD TEXT
+# ============================================================
+
+def oled_centered_text(text, y):
+
+    """
+    Draw standard 8x8 text centered horizontally.
+    """
+
+    if oled is None:
+        return
+
+    text = str(text)[:OLED_MAX_CHARS]
+
+    text_width = (
+        len(text) * OLED_CHAR_WIDTH
+    )
+
+    x = (
+        OLED_WIDTH - text_width
+    ) // 2
+
+    oled.text(
+        text,
+        x,
+        y
+    )
+
+
+# ============================================================
+# OLED SMALL TEXT
+# ============================================================
+
+def oled_small_character(character, x, y):
+
+    """
+    Draw one 3x5 bitmap character.
+    """
+
+    if oled is None:
+        return
+
+    character = character.upper()
+
+    bitmap = SMALL_FONT.get(
+        character,
+        SMALL_FONT["?"]
+    )
+
+    for row in range(SMALL_CHAR_HEIGHT):
+
+        for column in range(SMALL_CHAR_WIDTH):
+
+            if bitmap[row][column] == "1":
+
+                oled.pixel(
+                    x + column,
+                    y + row,
+                    1
+                )
+
+
+def oled_small_text(text, x, y):
+
+    """
+    Draw text using the smaller 3x5 font.
+    """
+
+    text = str(text)
+
+    step = (
+        SMALL_CHAR_WIDTH
+        + SMALL_CHAR_SPACING
+    )
+
+    for index, character in enumerate(text):
+
+        oled_small_character(
+            character,
+            x + index * step,
+            y
+        )
+
+
+def oled_centered_small_text(text, y):
+
+    """
+    Draw small text centered horizontally.
+    """
+
+    if oled is None:
+        return
+
+    text = str(text)
+
+    step = (
+        SMALL_CHAR_WIDTH
+        + SMALL_CHAR_SPACING
+    )
+
+    text_width = (
+        len(text) * step
+        - SMALL_CHAR_SPACING
+    )
+
+    x = (
+        OLED_WIDTH - text_width
+    ) // 2
+
+    oled_small_text(
+        text,
+        x,
+        y
+    )
+
+
+def wrap_small_text(text):
+
+    """
+    Wrap small text while preserving screen margins.
+    """
+
+    text = str(text).strip()
+
+    if not text:
+        return []
+
+    step = (
+        SMALL_CHAR_WIDTH
+        + SMALL_CHAR_SPACING
+    )
+
+    usable_width = (
+        OLED_WIDTH - 2 * OLED_MARGIN_X
+    )
+
+    max_chars = max(
+        1,
+        (
+            usable_width + SMALL_CHAR_SPACING
+        ) // step
+    )
+
+    lines = []
+    current_line = ""
+
+    for word in text.split():
+
+        while len(word) > max_chars:
+
+            if current_line:
+                lines.append(current_line)
+                current_line = ""
+
+            lines.append(
+                word[:max_chars]
+            )
+
+            word = word[max_chars:]
+
+        if not word:
+            continue
+
+        if not current_line:
+
+            current_line = word
+
+        elif (
+            len(current_line) + 1 + len(word)
+            <= max_chars
+        ):
+
+            current_line += " " + word
+
+        else:
+
+            lines.append(current_line)
+            current_line = word
+
+    if current_line:
+        lines.append(current_line)
+
+    return lines
+
+
+# ============================================================
+# OLED STATUS DISPLAY
+# ============================================================
+
+def display_status(status, detail="", extra=""):
+
+    """
+    Display centered status information.
+
+    Layout:
+
+        MAIN STATUS
+        optional main detail
+
+        smaller secondary information
+
+    When extra is supplied:
+
+        status = main heading
+        detail = main detail
+        extra  = small secondary information
+
+    Otherwise:
+
+        status = main heading
+        detail = small secondary information
+    """
+
+    global oled_status
+    global oled_detail
+
+    oled_status = str(status)
+    oled_detail = str(detail)
+
+    if oled is None:
+        return
+
+    try:
+
+        oled.fill(0)
+
+        # --------------------------------------------
+        # Determine main and secondary text
+        # --------------------------------------------
+
+        main_lines = wrap_oled_text(
+            status
+        )
+
+        if extra:
+
+            main_lines.extend(
+                wrap_oled_text(detail)
+            )
+
+            secondary_lines = wrap_small_text(
+                extra
+            )
+
+        else:
+
+            secondary_lines = wrap_small_text(
+                detail
+            )
+
+        # --------------------------------------------
+        # Calculate heights
+        # --------------------------------------------
+
+        main_count = len(main_lines)
+        secondary_count = len(secondary_lines)
+
+        main_height = 0
+
+        if main_count:
+
+            main_height = (
+                main_count * OLED_CHAR_HEIGHT
+                + (main_count - 1) * OLED_LINE_SPACING
+            )
+
+        secondary_height = 0
+
+        if secondary_count:
+
+            secondary_height = (
+                secondary_count * SMALL_CHAR_HEIGHT
+                + (secondary_count - 1) * 3
+            )
+
+        section_spacing = 0
+
+        if main_count and secondary_count:
+
+            section_spacing = OLED_SECTION_SPACING
+
+        total_height = (
+            main_height
+            + section_spacing
+            + secondary_height
+        )
+
+        # --------------------------------------------
+        # Ensure content fits vertically
+        # --------------------------------------------
+
+        available_height = (
+            OLED_HEIGHT - 2 * OLED_MARGIN_Y
+        )
+
+        while (
+            total_height > available_height
+            and len(main_lines) > 1
+        ):
+
+            main_lines.pop()
+
+            main_count = len(main_lines)
+
+            main_height = (
+                main_count * OLED_CHAR_HEIGHT
+                + (main_count - 1) * OLED_LINE_SPACING
+            )
+
+            total_height = (
+                main_height
+                + section_spacing
+                + secondary_height
+            )
+
+        while (
+            total_height > available_height
+            and secondary_lines
+        ):
+
+            secondary_lines.pop()
+
+            secondary_count = len(secondary_lines)
+
+            if secondary_count:
+
+                secondary_height = (
+                    secondary_count * SMALL_CHAR_HEIGHT
+                    + (secondary_count - 1) * 3
+                )
+
+            else:
+
+                secondary_height = 0
+                section_spacing = 0
+
+            total_height = (
+                main_height
+                + section_spacing
+                + secondary_height
+            )
+
+        # --------------------------------------------
+        # Vertical centering
+        # --------------------------------------------
+
+        y = (
+            OLED_HEIGHT - total_height
+        ) // 2
+
+        # --------------------------------------------
+        # Draw main text
+        # --------------------------------------------
+
+        for line in main_lines:
+
+            oled_centered_text(
+                line,
+                y
+            )
+
+            y += (
+                OLED_CHAR_HEIGHT
+                + OLED_LINE_SPACING
+            )
+
+        # Remove the final line spacing
+
+        if main_lines:
+
+            y -= OLED_LINE_SPACING
+
+        # --------------------------------------------
+        # Draw secondary text
+        # --------------------------------------------
+
+        if secondary_lines:
+
+            y += section_spacing
+
+            for line in secondary_lines:
+
+                oled_centered_small_text(
+                    line,
+                    y
+                )
+
+                y += (
+                    SMALL_CHAR_HEIGHT + 3
+                )
+
+        oled.show()
+
+    except Exception as error:
+
+        print(
+            "OLED update failed:",
+            error
+        )
+
+
+def hold_connection_result():
+
+    if CONNECTION_RESULT_DISPLAY_MS > 0:
+
+        sleep_ms(
+            CONNECTION_RESULT_DISPLAY_MS
+        )
 
 
 # ============================================================
@@ -185,30 +775,24 @@ last_mqtt_service_ms = ticks_ms()
 chair_logic = None
 
 recovery_mode = False
-
 recovery_error = None
 
 
 # ============================================================
-# LOCAL LOG FILE
+# LOCAL LOGGING
 # ============================================================
 
 def start_log():
 
     try:
 
-        with open(
-            LOG_FILE,
-            "a"
-        ) as file:
+        with open(LOG_FILE, "a") as file:
 
             file.write(
                 "\n==============================\n"
             )
 
-            file.write(
-                "BOOT\n"
-            )
+            file.write("BOOT\n")
 
     except Exception as error:
 
@@ -222,122 +806,43 @@ def write_event_to_file(message):
 
     try:
 
-        with open(
-            LOG_FILE,
-            "a"
-        ) as file:
+        with open(LOG_FILE, "a") as file:
 
-            file.write(
-                str(message)
-            )
-
-            file.write(
-                "\n"
-            )
+            file.write(str(message))
+            file.write("\n")
 
     except Exception:
         pass
 
 
-# ============================================================
-# RECONNECT-AFTER-REBOOT FLAG
-# ============================================================
+def local_event_log(message=""):
 
-def request_reconnect_after_reboot(reason):
-    """
-    Ask the next boot to reconnect automatically.
+    message = str(message)
 
-    reason should normally be:
-        reboot
-        update
-        rollback
-    """
+    print(message)
 
-    try:
-
-        with open(
-            RECONNECT_FILE,
-            "w"
-        ) as file:
-
-            file.write(
-                str(reason)
-            )
-
-        return True
-
-    except Exception as error:
-
-        local_event_log(
-            "Could not create reconnect flag: {}".format(
-                error
-            )
-        )
-
-        return False
+    write_event_to_file(message)
 
 
-def take_reconnect_after_reboot():
-    """
-    Read and consume the one-shot reconnect flag.
+def event_log(message=""):
 
-    Returns:
-        None
-            if there is no automatic reconnect request
+    message = str(message)
 
-        string
-            reboot / update / rollback
+    print(message)
 
-    The file is removed before networking is attempted so the
-    request cannot accidentally repeat on later boots.
-    """
+    write_event_to_file(message)
 
-    try:
+    queue_event(message)
 
-        with open(
-            RECONNECT_FILE,
-            "r"
-        ) as file:
 
-            reason = file.read().strip()
+def chair_log(message=""):
 
-    except OSError:
+    message = str(message)
 
-        return None
+    print(message)
 
-    try:
-
-        os.remove(
-            RECONNECT_FILE
-        )
-
-    except Exception as error:
-
-        local_event_log(
-            "Could not remove reconnect flag: {}".format(
-                error
-            )
-        )
-
-        # Do not automatically reconnect if the one-shot flag
-        # could not be consumed.
-        return None
-
-    if reason not in (
-        "reboot",
-        "update",
-        "rollback"
-    ):
-
-        # Compatibility with the previous version, which wrote
-        # "1" into the flag.
-        if reason == "1":
-
-            return "reboot"
-
-        return "reboot"
-
-    return reason
+    if remote_telemetry_enabled:
+        queue_telemetry(message)
 
 
 # ============================================================
@@ -346,36 +851,22 @@ def take_reconnect_after_reboot():
 
 def queue_event(message):
 
-    global pending_events
-
     message = str(message)
 
     if len(pending_events) >= EVENT_QUEUE_LIMIT:
-
         pending_events.pop(0)
 
-    pending_events.append(
-        message
-    )
+    pending_events.append(message)
 
 
 def queue_telemetry(message):
 
     global pending_telemetry
 
-    pending_telemetry = str(
-        message
-    )
+    pending_telemetry = str(message)
 
 
 def clear_mqtt_queues():
-    """
-    Discard messages that were queued while MQTT was offline.
-
-    This is particularly useful after an automatic reboot:
-    boot and connection messages printed before MQTT existed
-    should not later appear remotely as though they were live.
-    """
 
     global pending_events
     global pending_telemetry
@@ -385,84 +876,7 @@ def clear_mqtt_queues():
 
 
 # ============================================================
-# LOGGING
-# ============================================================
-
-def local_event_log(message=""):
-    """
-    Important local event.
-
-    Printed over USB / REPL and stored in maintenance.log.
-
-    It is deliberately NOT queued for MQTT.
-
-    Used for operations such as update/rollback where a reboot
-    is imminent and MQTT delivery cannot be guaranteed.
-    """
-
-    message = str(message)
-
-    print(
-        message
-    )
-
-    write_event_to_file(
-        message
-    )
-
-
-def event_log(message=""):
-    """
-    Important supervisor event.
-
-    Printed immediately, stored in maintenance.log and queued
-    for MQTT.
-
-    These messages are NOT affected by logs-on / logs-off.
-    """
-
-    message = str(message)
-
-    print(
-        message
-    )
-
-    write_event_to_file(
-        message
-    )
-
-    queue_event(
-        message
-    )
-
-
-def chair_log(message=""):
-    """
-    Logging callback supplied to chair_logic.
-
-    Chair diagnostics are always printed locally.
-
-    When remote telemetry is enabled, the newest diagnostic
-    message is also retained for MQTT.
-
-    Chair diagnostics are NOT continuously written to flash.
-    """
-
-    message = str(message)
-
-    print(
-        message
-    )
-
-    if remote_telemetry_enabled:
-
-        queue_telemetry(
-            message
-        )
-
-
-# ============================================================
-# REMOTE TELEMETRY CONTROL
+# REMOTE TELEMETRY
 # ============================================================
 
 def handle_logs_off():
@@ -471,7 +885,6 @@ def handle_logs_off():
     global pending_telemetry
 
     remote_telemetry_enabled = False
-
     pending_telemetry = None
 
     event_log(
@@ -491,50 +904,57 @@ def handle_logs_on():
 
 
 # ============================================================
-# LED
+# RECONNECT FLAG
 # ============================================================
 
-def flash_led(
-    count,
-    on_ms=150,
-    off_ms=150
-):
+def request_reconnect_after_reboot(reason):
 
-    for _ in range(count):
+    try:
 
-        led.value(1)
-        sleep_ms(on_ms)
+        with open(RECONNECT_FILE, "w") as file:
+            file.write(str(reason))
 
-        led.value(0)
-        sleep_ms(off_ms)
+        return True
 
+    except Exception as error:
 
-def connection_success_pattern():
+        local_event_log(
+            "Could not create reconnect flag: {}".format(
+                error
+            )
+        )
 
-    led.value(0)
-
-    sleep_ms(200)
-
-    flash_led(
-        count=5,
-        on_ms=100,
-        off_ms=100
-    )
-
-    led.value(0)
+        return False
 
 
-def connection_failed_pattern():
+def take_reconnect_after_reboot():
 
-    led.value(0)
+    try:
 
-    flash_led(
-        count=3,
-        on_ms=500,
-        off_ms=500
-    )
+        with open(RECONNECT_FILE, "r") as file:
+            reason = file.read().strip()
 
-    led.value(0)
+    except OSError:
+        return None
+
+    try:
+
+        os.remove(RECONNECT_FILE)
+
+    except Exception as error:
+
+        local_event_log(
+            "Could not remove reconnect flag: {}".format(
+                error
+            )
+        )
+
+        return None
+
+    if reason in ("reboot", "update", "rollback"):
+        return reason
+
+    return "reboot"
 
 
 # ============================================================
@@ -547,9 +967,7 @@ def check_connection_button():
 
     if connection_button.value() != 0:
 
-        if connection_requested:
-            connection_requested = False
-
+        connection_requested = False
         return False
 
     if connection_requested:
@@ -574,14 +992,13 @@ def wait_for_button_release():
     global connection_requested
 
     while connection_button.value() == 0:
-
         sleep_ms(20)
 
     connection_requested = False
 
 
 # ============================================================
-# MQTT COMMAND CALLBACK
+# MQTT CALLBACK
 # ============================================================
 
 def mqtt_command_received(command_text):
@@ -608,19 +1025,15 @@ def flush_one_mqtt_message():
     if not mqtt_manager.is_connected():
         return False
 
-    # Important event first.
     if pending_events:
 
         message = pending_events[0]
 
         try:
 
-            if mqtt_manager.send_log(
-                message
-            ):
+            if mqtt_manager.send_log(message):
 
                 pending_events.pop(0)
-
                 return True
 
         except Exception:
@@ -628,23 +1041,18 @@ def flush_one_mqtt_message():
 
         return False
 
-    # Then latest telemetry.
     if (
         remote_telemetry_enabled
-        and
-        pending_telemetry is not None
+        and pending_telemetry is not None
     ):
 
         message = pending_telemetry
 
         try:
 
-            if mqtt_manager.send_log(
-                message
-            ):
+            if mqtt_manager.send_log(message):
 
                 if pending_telemetry == message:
-
                     pending_telemetry = None
 
                 return True
@@ -656,42 +1064,24 @@ def flush_one_mqtt_message():
 
 
 def send_remote_now(message):
-    """
-    Attempt to send one message immediately over MQTT.
-
-    This is used only when MQTT is already known to be
-    connected, for example after a successful automatic
-    post-reboot reconnect.
-
-    The message is still printed and stored locally.
-    """
 
     message = str(message)
 
-    print(
-        message
-    )
-
-    write_event_to_file(
-        message
-    )
+    print(message)
+    write_event_to_file(message)
 
     if not mqtt_manager.is_connected():
         return False
 
     try:
-
-        return mqtt_manager.send_log(
-            message
-        )
+        return mqtt_manager.send_log(message)
 
     except Exception:
-
         return False
 
 
 # ============================================================
-# NETWORK SERVICE WHILE DRIVING
+# MQTT SERVICE
 # ============================================================
 
 def service_mqtt_if_due():
@@ -704,7 +1094,6 @@ def service_mqtt_if_due():
         now,
         last_mqtt_service_ms
     ) < MQTT_SERVICE_INTERVAL_MS:
-
         return
 
     last_mqtt_service_ms = now
@@ -713,23 +1102,28 @@ def service_mqtt_if_due():
         return
 
     try:
-
         mqtt_manager.check_messages()
 
-    except Exception:
+    except Exception as error:
+
+        # Avoid repeatedly writing failures to flash.
+        print(
+            "MQTT service error:",
+            error
+        )
+
         return
 
     flush_one_mqtt_message()
 
 
 # ============================================================
-# CHAIR STOP CALLBACK
+# SUPERVISOR CALLBACK
 # ============================================================
 
 def supervisor_service():
 
     if check_connection_button():
-
         return True
 
     service_mqtt_if_due()
@@ -739,55 +1133,108 @@ def supervisor_service():
     if command is None:
         return False
 
-    if command_manager.requires_chair_stop(
-        command
-    ):
-
-        return True
-
-    # Non-stop commands are still processed outside the
-    # real-time chair loop.
     return True
 
 
 # ============================================================
-# NETWORK CONNECTION
+# NETWORK HELPERS
 # ============================================================
 
-def connect_network(
-    wait_for_release=True
-):
+def wifi_is_connected():
 
-    event_log("")
-    event_log(
-        "=============================="
-    )
-    event_log(
-        "NETWORK CONNECTION"
-    )
-    event_log(
-        "=============================="
-    )
+    try:
+        return bool(wifi_manager.is_connected())
 
-    event_log(
-        "Wheelchair outputs temporarily disabled."
-    )
+    except Exception:
+        return False
 
-    # Solid GP2 while connecting.
-    led.value(1)
 
-    wifi_ok = False
-    mqtt_ok = False
+def mqtt_is_connected():
 
-    # --------------------------------------------------------
-    # WIFI
-    # --------------------------------------------------------
+    try:
+        return bool(mqtt_manager.is_connected())
+
+    except Exception:
+        return False
+
+
+def get_connected_ssid():
+
+    """
+    Return the currently connected Wi-Fi SSID.
+
+    Returns an empty string if unavailable.
+    """
+
+    if not wifi_is_connected():
+        return ""
 
     try:
 
-        wifi_ok = wifi_manager.connect(
+        ssid = wifi_manager.current_ssid()
+
+        if ssid is None:
+            return ""
+
+        if isinstance(ssid, bytes):
+            ssid = ssid.decode("utf-8")
+
+        return str(ssid)
+
+    except Exception:
+        return ""
+
+
+def connect_wifi_with_retries():
+
+    """
+    Attempt Wi-Fi connection once.
+
+    Uses the existing wifi_manager implementation.
+    """
+
+    if wifi_is_connected():
+
+        event_log(
+            "Wi-Fi already connected."
+        )
+
+        display_status(
+            "WIFI OK",
+            "Already connected",
+            get_connected_ssid()
+        )
+
+        return True
+
+    display_status(
+        "CONNECTING",
+        "WiFi"
+    )
+
+    event_log(
+        "Attempting Wi-Fi connection."
+    )
+
+    try:
+
+        result = wifi_manager.connect(
             log=event_log
         )
+
+        if result or wifi_is_connected():
+
+            event_log(
+                "Wi-Fi connection established."
+            )
+
+            display_status(
+                "WIFI OK",
+                "Connecting MQTT",
+                get_connected_ssid()
+            )
+
+            return True
 
     except Exception as error:
 
@@ -797,32 +1244,95 @@ def connect_network(
             )
         )
 
-        wifi_ok = False
+    event_log(
+        "Wi-Fi connection attempt failed."
+    )
 
-    # --------------------------------------------------------
-    # MQTT
-    # --------------------------------------------------------
+    return False
+
+
+def connect_mqtt_with_retries():
+
+    """
+    Attempt MQTT connection once.
+    """
+
+    if mqtt_is_connected():
+
+        event_log(
+            "MQTT already connected."
+        )
+
+        return True
+
+    display_status(
+        "MQTT CONNECT",
+        "Connecting..."
+    )
+
+    event_log(
+        "Attempting MQTT connection."
+    )
+
+    try:
+
+        result = mqtt_manager.connect(
+            log=event_log
+        )
+
+        if result or mqtt_is_connected():
+
+            event_log(
+                "MQTT connection established."
+            )
+
+            return True
+
+    except Exception as error:
+
+        event_log(
+            "MQTT connection error: {}".format(
+                error
+            )
+        )
+
+    event_log(
+        "MQTT connection attempt failed."
+    )
+
+    return False
+
+
+# ============================================================
+# NETWORK CONNECTION
+# ============================================================
+
+def connect_network(wait_for_release=True):
+
+    event_log("")
+    event_log("==============================")
+    event_log("NETWORK CONNECTION")
+    event_log("==============================")
+
+    event_log(
+        "Wheelchair outputs temporarily disabled."
+    )
+
+    display_status(
+        "CONNECTING",
+        "Starting..."
+    )
+
+    wifi_ok = connect_wifi_with_retries()
+
+    mqtt_ok = False
 
     if wifi_ok:
 
-        try:
-
-            mqtt_ok = mqtt_manager.connect(
-                log=event_log
-            )
-
-        except Exception as error:
-
-            event_log(
-                "MQTT connection error: {}".format(
-                    error
-                )
-            )
-
-            mqtt_ok = False
+        mqtt_ok = connect_mqtt_with_retries()
 
     # --------------------------------------------------------
-    # RESULT / LED
+    # RESULT
     # --------------------------------------------------------
 
     if wifi_ok and mqtt_ok:
@@ -831,28 +1341,52 @@ def connect_network(
             "Remote logging and commands connected."
         )
 
-        # Five quick flashes.
-        connection_success_pattern()
+        ssid = get_connected_ssid()
+
+        if ssid:
+
+            display_status(
+                "Connected to",
+                ssid,
+                "WiFi + MQTT OK"
+            )
+
+        else:
+
+            display_status(
+                "CONNECTED",
+                "WiFi + MQTT OK"
+            )
+
+    elif not wifi_ok:
+
+        event_log(
+            "Wi-Fi connection failed."
+        )
+
+        display_status(
+            "WIFI FAILED",
+            "Check WiFi"
+        )
 
     else:
 
         event_log(
-            "Remote connection unavailable."
+            "MQTT connection failed."
         )
 
-        # Three slow flashes.
-        connection_failed_pattern()
+        display_status(
+            "MQTT FAILED",
+            "WiFi connected",
+            get_connected_ssid()
+        )
 
     if wait_for_release:
-
         wait_for_button_release()
 
-    led.value(0)
+    hold_connection_result()
 
-    return (
-        wifi_ok
-        and mqtt_ok
-    )
+    return wifi_ok and mqtt_ok
 
 
 # ============================================================
@@ -862,45 +1396,25 @@ def connect_network(
 def report_status():
 
     event_log("")
-    event_log(
-        "=============================="
-    )
-    event_log(
-        "STATUS"
-    )
-    event_log(
-        "=============================="
-    )
+    event_log("==============================")
+    event_log("STATUS")
+    event_log("==============================")
 
     try:
-
         version = updater.current_version()
 
     except Exception:
-
         version = "unknown"
 
     event_log(
-        "Version: {}".format(
-            version
-        )
+        "Version: {}".format(version)
     )
 
-    try:
-
-        wifi_connected = (
-            wifi_manager.is_connected()
-        )
-
-    except Exception:
-
-        wifi_connected = False
+    wifi_connected = wifi_is_connected()
 
     event_log(
         "Wi-Fi: {}".format(
-            "connected"
-            if wifi_connected
-            else "disconnected"
+            "connected" if wifi_connected else "disconnected"
         )
     )
 
@@ -928,37 +1442,21 @@ def report_status():
         except Exception:
             pass
 
-    try:
-
-        mqtt_connected = (
-            mqtt_manager.is_connected()
-        )
-
-    except Exception:
-
-        mqtt_connected = False
-
     event_log(
         "MQTT: {}".format(
-            "connected"
-            if mqtt_connected
-            else "disconnected"
+            "connected" if mqtt_is_connected() else "disconnected"
         )
     )
 
     event_log(
         "Remote telemetry: {}".format(
-            "ON"
-            if remote_telemetry_enabled
-            else "OFF"
+            "ON" if remote_telemetry_enabled else "OFF"
         )
     )
 
     event_log(
         "Mode: {}".format(
-            "RECOVERY"
-            if recovery_mode
-            else "NORMAL"
+            "RECOVERY" if recovery_mode else "NORMAL"
         )
     )
 
@@ -978,21 +1476,14 @@ def report_status():
 def handle_check_update():
 
     event_log("")
-    event_log(
-        "Checking for software update."
-    )
+    event_log("Checking for software update.")
 
     try:
 
         result = updater.check_update()
 
-        local_version = result[
-            "local"
-        ]
-
-        remote_version = result[
-            "remote"
-        ]
+        local_version = result["local"]
+        remote_version = result["remote"]
 
         event_log(
             "Installed version: {}".format(
@@ -1006,13 +1497,9 @@ def handle_check_update():
             )
         )
 
-        if result[
-            "update_available"
-        ]:
+        if result["update_available"]:
 
-            event_log(
-                "Update available."
-            )
+            event_log("Update available.")
 
         else:
 
@@ -1035,13 +1522,8 @@ def handle_check_update():
 
 def handle_add_wifi(command):
 
-    ssid = command.get(
-        "ssid"
-    )
-
-    password = command.get(
-        "password"
-    )
+    ssid = command.get("ssid")
+    password = command.get("password")
 
     if ssid is None or password is None:
 
@@ -1080,11 +1562,6 @@ def handle_add_wifi(command):
 
 def handle_update():
 
-    # From this point onward, update progress is local only.
-    #
-    # We do not queue a series of MQTT messages immediately
-    # before deliberately rebooting the Pico.
-
     local_event_log("")
     local_event_log(
         "Software update requested."
@@ -1102,8 +1579,6 @@ def handle_update():
 
     except Exception as error:
 
-        # The update failed, so the Pico is NOT rebooting.
-        # Report the failure remotely as a real normal event.
         event_log(
             "Update failed: {}".format(
                 error
@@ -1124,10 +1599,6 @@ def handle_update():
         "Update installed successfully."
     )
 
-    # --------------------------------------------------------
-    # DIAGNOSTIC: CREATE RECONNECT FLAG
-    # --------------------------------------------------------
-
     flag_ok = request_reconnect_after_reboot(
         "update"
     )
@@ -1138,20 +1609,10 @@ def handle_update():
         )
     )
 
-    # --------------------------------------------------------
-    # DIAGNOSTIC: READ FLAG BACK BEFORE REBOOT
-    # --------------------------------------------------------
-
     try:
 
-        with open(
-            RECONNECT_FILE,
-            "r"
-        ) as file:
-
-            flag_contents = (
-                file.read().strip()
-            )
+        with open(RECONNECT_FILE, "r") as file:
+            flag_contents = file.read().strip()
 
         local_event_log(
             "Reconnect flag contains: {}".format(
@@ -1166,6 +1627,11 @@ def handle_update():
                 error
             )
         )
+
+    display_status(
+        "REBOOTING",
+        "Update installed"
+    )
 
     local_event_log(
         "Rebooting after update."
@@ -1223,6 +1689,11 @@ def handle_rollback():
         "rollback"
     )
 
+    display_status(
+        "REBOOTING",
+        "Rollback complete"
+    )
+
     local_event_log(
         "Rebooting after rollback."
     )
@@ -1251,9 +1722,9 @@ def handle_reboot():
         "reboot"
     )
 
-    local_event_log(
-        "Rebooting."
-    )
+    display_status("REBOOTING")
+
+    local_event_log("Rebooting.")
 
     sleep_ms(500)
 
@@ -1271,12 +1742,8 @@ def process_pending_command():
     if command is None:
         return
 
-    command_name = command.get(
-        "command"
-    )
+    command_name = command.get("command")
 
-    # For commands that immediately lead to a reboot, don't
-    # create another MQTT event that may never be delivered.
     if command_name in (
         command_manager.COMMAND_UPDATE,
         command_manager.COMMAND_ROLLBACK,
@@ -1285,9 +1752,7 @@ def process_pending_command():
 
         local_event_log(
             "Processing command: {}".format(
-                command_manager.describe(
-                    command
-                )
+                command_manager.describe(command)
             )
         )
 
@@ -1295,9 +1760,7 @@ def process_pending_command():
 
         event_log(
             "Processing command: {}".format(
-                command_manager.describe(
-                    command
-                )
+                command_manager.describe(command)
             )
         )
 
@@ -1311,9 +1774,7 @@ def process_pending_command():
 
     elif command_name == command_manager.COMMAND_ADD_WIFI:
 
-        handle_add_wifi(
-            command
-        )
+        handle_add_wifi(command)
 
     elif command_name == command_manager.COMMAND_LOGS_OFF:
 
@@ -1337,9 +1798,7 @@ def process_pending_command():
 
     else:
 
-        event_log(
-            "Unsupported command."
-        )
+        event_log("Unsupported command.")
 
 
 # ============================================================
@@ -1355,10 +1814,7 @@ def load_chair_logic():
     try:
 
         if "chair_logic" in sys.modules:
-
-            del sys.modules[
-                "chair_logic"
-            ]
+            del sys.modules["chair_logic"]
 
         import chair_logic as loaded_chair_logic
 
@@ -1385,8 +1841,11 @@ def load_chair_logic():
             )
         )
 
-        event_log(
-            recovery_error
+        event_log(recovery_error)
+
+        display_status(
+            "RECOVERY",
+            "Logic load failed"
         )
 
         return False
@@ -1419,13 +1878,6 @@ def stop_chair_outputs():
 # ============================================================
 
 def report_post_reboot_success(reason):
-    """
-    Send a truthful confirmation after MQTT has actually
-    reconnected.
-
-    These messages are transmitted immediately rather than
-    merely placed in the normal queue.
-    """
 
     if reason == "update":
 
@@ -1434,11 +1886,9 @@ def report_post_reboot_success(reason):
         )
 
         try:
-
             version = updater.current_version()
 
         except Exception:
-
             version = "unknown"
 
         send_remote_now(
@@ -1454,11 +1904,9 @@ def report_post_reboot_success(reason):
         )
 
         try:
-
             version = updater.current_version()
 
         except Exception:
-
             version = "unknown"
 
         send_remote_now(
@@ -1475,10 +1923,6 @@ def report_post_reboot_success(reason):
 
 
 def automatic_reconnect(reason):
-    """
-    Perform the one-shot automatic network connection requested
-    by a remote reboot/update/rollback.
-    """
 
     local_event_log("")
     local_event_log(
@@ -1493,16 +1937,9 @@ def automatic_reconnect(reason):
 
     if connected:
 
-        # Discard messages that were generated while MQTT was
-        # unavailable. They were local boot/connection events,
-        # not messages that were actually delivered remotely.
         clear_mqtt_queues()
 
-        # Now send a fresh message over the connection that
-        # actually exists.
-        report_post_reboot_success(
-            reason
-        )
+        report_post_reboot_success(reason)
 
     return connected
 
@@ -1511,24 +1948,19 @@ def automatic_reconnect(reason):
 # RECOVERY MODE
 # ============================================================
 
-def recovery_loop(
-    auto_reconnect_reason=None
-):
+def recovery_loop(auto_reconnect_reason=None):
 
     global last_mqtt_service_ms
 
-    led.value(0)
+    display_status(
+        "RECOVERY",
+        "Control disabled"
+    )
 
     local_event_log("")
-    local_event_log(
-        "=============================="
-    )
-    local_event_log(
-        "RECOVERY MODE"
-    )
-    local_event_log(
-        "=============================="
-    )
+    local_event_log("==============================")
+    local_event_log("RECOVERY MODE")
+    local_event_log("==============================")
 
     local_event_log(
         "Wheelchair control is disabled."
@@ -1541,14 +1973,10 @@ def recovery_loop(
         )
 
     event_log(
-        "Press GP9 to connect to the network."
+        "Press GP26 to connect to the network."
     )
 
     while True:
-
-        # ----------------------------------------------------
-        # GP9 NETWORK CONNECTION
-        # ----------------------------------------------------
 
         if check_connection_button():
 
@@ -1560,10 +1988,6 @@ def recovery_loop(
                 "Recovery mode remains active."
             )
 
-        # ----------------------------------------------------
-        # MQTT
-        # ----------------------------------------------------
-
         now = ticks_ms()
 
         if ticks_diff(
@@ -1573,20 +1997,15 @@ def recovery_loop(
 
             last_mqtt_service_ms = now
 
-            if mqtt_manager.is_connected():
+            if mqtt_is_connected():
 
                 try:
-
                     mqtt_manager.check_messages()
 
                 except Exception:
                     pass
 
                 flush_one_mqtt_message()
-
-        # ----------------------------------------------------
-        # COMMAND
-        # ----------------------------------------------------
 
         if command_manager.has_pending_command():
 
@@ -1605,15 +2024,17 @@ local_event_log(
     "Starting wheelchair supervisor."
 )
 
-led.value(0)
+initialize_oled()
 
-# Consume the one-shot reconnect reason immediately.
+display_status(
+    "OFFLINE",
+    "Starting..."
+)
+
 auto_reconnect_reason = (
     take_reconnect_after_reboot()
 )
 
-# Diagnostic output. This tells us whether a reconnect request
-# survived the previous reset.
 local_event_log(
     "Post-reboot reconnect reason: {}".format(
         auto_reconnect_reason
@@ -1638,14 +2059,11 @@ try:
         )
 
     # --------------------------------------------------------
-    # AUTOMATIC POST-REBOOT NETWORK CONNECTION
+    # AUTOMATIC POST-REBOOT CONNECTION
     # --------------------------------------------------------
 
     if auto_reconnect_reason is not None:
 
-        # chair_logic has loaded, but chair control has not yet
-        # started. Outputs therefore remain stopped while
-        # networking is established.
         automatic_reconnect(
             auto_reconnect_reason
         )
@@ -1684,12 +2102,15 @@ try:
             )
 
             event_log("")
-            event_log(
-                recovery_error
-            )
+            event_log(recovery_error)
 
             event_log(
                 "Entering recovery mode."
+            )
+
+            display_status(
+                "RECOVERY",
+                "Runtime error"
             )
 
             recovery_loop()
@@ -1705,7 +2126,7 @@ try:
         )
 
         # ----------------------------------------------------
-        # GP9 NETWORK REQUEST
+        # GP26 NETWORK REQUEST
         # ----------------------------------------------------
 
         if connection_requested:
@@ -1732,9 +2153,6 @@ try:
 
             process_pending_command()
 
-            # update / rollback / reboot normally reset the
-            # Pico. Other commands return here.
-
             event_log(
                 "Resuming wheelchair control."
             )
@@ -1754,7 +2172,10 @@ except KeyboardInterrupt:
 
     stop_chair_outputs()
 
-    led.value(0)
+    display_status(
+        "STOPPED",
+        "KeyboardInterrupt"
+    )
 
     local_event_log("")
     local_event_log(
@@ -1774,7 +2195,10 @@ except Exception as error:
 
     stop_chair_outputs()
 
-    led.value(0)
+    display_status(
+        "ERROR",
+        "Supervisor failed"
+    )
 
     local_event_log("")
     local_event_log(
