@@ -1,6 +1,6 @@
 """
-Wheelchair Hall Sensor Revolution Counter
-=========================================
+Wheelchair Hall Sensor and Handbrake Servo Diagnostic
+====================================================
 
 GPIO assignments
 ----------------
@@ -12,25 +12,34 @@ GP13    Back Left Hall sensor (BL)
 GP20    OLED SDA
 GP21    OLED SCL
 
-Counting
---------
+GP22    Handbrake servo PWM
+GP28    Joystick Y-axis ADC
+
+Hall sensor counting
+--------------------
 Both rising and falling edges are counted.
 
-8 transitions = 1 revolution.
+16 transitions = 1 wheel revolution.
 
-Revolution counts accumulate from program start.
+Revolution counts accumulate since run() starts.
 
-The program uses GPIO interrupts to detect short
-pulses without relying on the main loop frequency.
+GPIO interrupts detect Hall sensor transitions
+independently of the main loop.
 
-Display
--------
-Shows cumulative revolutions for all four wheels.
+Handbrake servo
+---------------
+Joystick Y controls servo position.
+
+Fully backward: 1000 us
+Center:         1500 us
+Fully forward:  2000 us
+
+Servo PWM frequency: 50 Hz
 
 Logging
 -------
-Prints and sends revolution counts every second
-through the supplied log() function.
+Reports cumulative wheel revolutions and
+handbrake servo position every second.
 
 Compatibility
 -------------
@@ -39,15 +48,16 @@ stop_outputs()
 
 Compatible with existing main.py.
 
-All traction motors and servos remain disabled.
+Traction motors and steering servo remain disabled.
 """
 
-from machine import Pin, I2C, disable_irq, enable_irq
+from machine import Pin, PWM, ADC, I2C
+from machine import disable_irq, enable_irq
 from time import ticks_ms, ticks_diff, sleep_ms
 
 
 # ============================================================
-# SETTINGS
+# GENERAL SETTINGS
 # ============================================================
 
 LOOP_PERIOD_MS = 20
@@ -56,7 +66,7 @@ LOG_INTERVAL_MS = 1000
 
 DISPLAY_INTERVAL_MS = 200
 
-TRANSITIONS_PER_REVOLUTION = 8
+TRANSITIONS_PER_REVOLUTION = 16
 
 DISPLAY_X_OFFSET = 8
 
@@ -67,10 +77,68 @@ OLED_HEIGHT = 64
 
 
 # ============================================================
-# SAFETY: DISABLE OUTPUTS
+# JOYSTICK CALIBRATION
 # ============================================================
 
-def stop_outputs():
+Y_BACKWARD = 6632
+
+Y_CENTER = 44581
+
+Y_FORWARD = 65384
+
+Y_DEADZONE = 1600
+
+y_adc = ADC(28)
+
+
+# ============================================================
+# HANDBRAKE SERVO SETTINGS
+# ============================================================
+
+HANDBRAKE_SERVO_PIN = 22
+
+HANDBRAKE_SERVO_FREQUENCY = 50
+
+HANDBRAKE_SERVO_MIN_US = 1000
+
+HANDBRAKE_SERVO_CENTER_US = 1500
+
+HANDBRAKE_SERVO_MAX_US = 2000
+
+HANDBRAKE_SERVO_PERIOD_US = 20000
+
+handbrake_servo = PWM(
+    Pin(HANDBRAKE_SERVO_PIN)
+)
+
+handbrake_servo.freq(
+    HANDBRAKE_SERVO_FREQUENCY
+)
+
+handbrake_servo.duty_u16(0)
+
+handbrake_servo_current_us = (
+    HANDBRAKE_SERVO_CENTER_US
+)
+
+
+# ============================================================
+# GENERAL FUNCTIONS
+# ============================================================
+
+def clamp(value, minimum, maximum):
+
+    return max(
+        minimum,
+        min(maximum, value)
+    )
+
+
+# ============================================================
+# SAFETY: DISABLE TRACTION AND STEERING
+# ============================================================
+
+def disable_drive_outputs():
 
     # Disable traction motor PWM signals.
     for pin_number in (14, 15, 17, 18):
@@ -88,19 +156,20 @@ def stop_outputs():
         value=0
     )
 
-    # Disable handbrake servo.
-    Pin(
-        22,
-        Pin.OUT,
-        value=0
-    )
-
-    # Release reverse signal.
+    # Release motor reverse signal.
     Pin(
         8,
         Pin.OPEN_DRAIN,
         value=1
     )
+
+
+def stop_outputs():
+
+    disable_drive_outputs()
+
+    # Disable handbrake servo PWM.
+    handbrake_servo.duty_u16(0)
 
 
 # ============================================================
@@ -136,9 +205,6 @@ hall_BL = Pin(
 # TRANSITION COUNTERS
 # ============================================================
 
-# Each counter stores the total number of transitions
-# detected since the diagnostic started.
-
 transitions_FR = 0
 transitions_BR = 0
 transitions_FL = 0
@@ -146,7 +212,7 @@ transitions_BL = 0
 
 
 # ============================================================
-# INTERRUPT HANDLERS
+# HALL INTERRUPT HANDLERS
 # ============================================================
 
 def irq_FR(pin):
@@ -178,7 +244,7 @@ def irq_BL(pin):
 
 
 # ============================================================
-# ENABLE INTERRUPTS
+# ENABLE HALL INTERRUPTS
 # ============================================================
 
 def enable_hall_interrupts():
@@ -210,14 +276,17 @@ def enable_hall_interrupts():
 
 
 # ============================================================
-# DISABLE INTERRUPTS
+# DISABLE HALL INTERRUPTS
 # ============================================================
 
 def disable_hall_interrupts():
 
     hall_FR.irq(handler=None)
+
     hall_BR.irq(handler=None)
+
     hall_FL.irq(handler=None)
+
     hall_BL.irq(handler=None)
 
 
@@ -248,9 +317,6 @@ def reset_counters():
 
 def get_transition_counts():
 
-    # Temporarily disable interrupts so that all
-    # four counters are copied consistently.
-
     state = disable_irq()
 
     fr = transitions_FR
@@ -280,6 +346,113 @@ def get_revolutions():
         name: counts[name] / TRANSITIONS_PER_REVOLUTION
         for name in counts
     }
+
+
+# ============================================================
+# JOYSTICK Y PERCENTAGE
+# ============================================================
+
+def get_y_percentage(y):
+
+    if abs(y - Y_CENTER) <= Y_DEADZONE:
+
+        return 0.0
+
+    if y < Y_CENTER:
+
+        fraction = (
+            Y_CENTER - Y_DEADZONE - y
+        ) / (
+            Y_CENTER - Y_DEADZONE - Y_BACKWARD
+        )
+
+        return -100.0 * clamp(
+            fraction,
+            0.0,
+            1.0
+        )
+
+    fraction = (
+        y - Y_CENTER - Y_DEADZONE
+    ) / (
+        Y_FORWARD - Y_CENTER - Y_DEADZONE
+    )
+
+    return 100.0 * clamp(
+        fraction,
+        0.0,
+        1.0
+    )
+
+
+# ============================================================
+# JOYSTICK TO SERVO PULSE
+# ============================================================
+
+def joystick_to_servo_us(y_percent):
+
+    y_percent = clamp(
+        y_percent,
+        -100.0,
+        100.0
+    )
+
+    if y_percent < 0:
+
+        pulse = (
+            HANDBRAKE_SERVO_CENTER_US
+            + y_percent / 100.0
+            * (
+                HANDBRAKE_SERVO_CENTER_US
+                - HANDBRAKE_SERVO_MIN_US
+            )
+        )
+
+    else:
+
+        pulse = (
+            HANDBRAKE_SERVO_CENTER_US
+            + y_percent / 100.0
+            * (
+                HANDBRAKE_SERVO_MAX_US
+                - HANDBRAKE_SERVO_CENTER_US
+            )
+        )
+
+    return int(
+        clamp(
+            pulse,
+            HANDBRAKE_SERVO_MIN_US,
+            HANDBRAKE_SERVO_MAX_US
+        )
+    )
+
+
+# ============================================================
+# SET HANDBRAKE SERVO
+# ============================================================
+
+def set_handbrake_servo_us(pulse_us):
+
+    global handbrake_servo_current_us
+
+    pulse_us = clamp(
+        pulse_us,
+        HANDBRAKE_SERVO_MIN_US,
+        HANDBRAKE_SERVO_MAX_US
+    )
+
+    duty = int(
+        pulse_us
+        * 65535
+        / HANDBRAKE_SERVO_PERIOD_US
+    )
+
+    handbrake_servo.duty_u16(duty)
+
+    handbrake_servo_current_us = int(
+        pulse_us
+    )
 
 
 # ============================================================
@@ -344,7 +517,11 @@ def oled_write(text, row):
 # OLED DISPLAY
 # ============================================================
 
-def display_revolutions(revolutions):
+def display_information(
+    revolutions,
+    y_percent,
+    servo_us
+):
 
     if oled is None:
         return
@@ -354,40 +531,42 @@ def display_revolutions(revolutions):
         oled.fill(0)
 
         oled_write(
-            "WHEEL REVOLUTIONS",
+            "REVOLUTIONS",
             0
         )
 
         oled_write(
-            "FR: {:.2f}".format(
-                revolutions["FR"]
+            "FR:{:.2f} BR:{:.2f}".format(
+                revolutions["FR"],
+                revolutions["BR"]
             ),
             1
         )
 
         oled_write(
-            "FL: {:.2f}".format(
-                revolutions["FL"]
+            "FL:{:.2f} BL:{:.2f}".format(
+                revolutions["FL"],
+                revolutions["BL"]
             ),
             2
         )
 
         oled_write(
-            "BR: {:.2f}".format(
-                revolutions["BR"]
-            ),
+            "16 edges/rev",
             3
         )
 
         oled_write(
-            "BL: {:.2f}".format(
-                revolutions["BL"]
+            "Joystick:{:+.0f}%".format(
+                y_percent
             ),
             4
         )
 
         oled_write(
-            "8 edges = 1 rev",
+            "Brake:{}us".format(
+                servo_us
+            ),
             5
         )
 
@@ -405,19 +584,27 @@ def display_revolutions(revolutions):
 # FORMAT LOG MESSAGE
 # ============================================================
 
-def format_revolution_log(revolutions):
+def format_log(
+    revolutions,
+    y_percent,
+    servo_us
+):
 
     return (
-        "HALL REVOLUTIONS | "
+        "HALL | "
         "FR:{:.3f} | "
         "FL:{:.3f} | "
         "BR:{:.3f} | "
-        "BL:{:.3f}"
+        "BL:{:.3f} | "
+        "Joystick Y:{:+.1f}% | "
+        "Handbrake servo:{}us"
     ).format(
         revolutions["FR"],
         revolutions["FL"],
         revolutions["BR"],
-        revolutions["BL"]
+        revolutions["BL"],
+        y_percent,
+        servo_us
     )
 
 
@@ -427,29 +614,33 @@ def format_revolution_log(revolutions):
 
 def run(stop_requested=None, log=print):
 
-    # Disable motor and servo outputs.
+    # Disable all outputs initially.
     stop_outputs()
 
-    # Start counting from zero.
+    # Reset revolution counters.
     disable_hall_interrupts()
 
     reset_counters()
 
-    # Enable edge detection.
+    # Enable Hall sensor interrupts.
     enable_hall_interrupts()
 
-    log("Hall revolution counter started.")
+    log("Hall and handbrake diagnostic started.")
 
     log("FR: GP10")
     log("BR: GP11")
     log("FL: GP12")
     log("BL: GP13")
 
-    log("8 transitions = 1 revolution.")
+    log("16 transitions = 1 revolution.")
 
-    log("Counting rising and falling edges.")
+    log("Handbrake servo: GP22")
 
-    log("Motor outputs disabled.")
+    log("Joystick Y: GP28")
+
+    log("Servo range: 1000-2000us")
+
+    log("Traction motors disabled.")
 
     last_log_ms = ticks_ms()
 
@@ -471,10 +662,32 @@ def run(stop_requested=None, log=print):
             ):
 
                 log(
-                    "Hall revolution counter stopped."
+                    "Diagnostic stopped."
                 )
 
                 return
+
+            # ============================================
+            # READ JOYSTICK
+            # ============================================
+
+            y_raw = y_adc.read_u16()
+
+            y_percent = get_y_percentage(
+                y_raw
+            )
+
+            # ============================================
+            # UPDATE HANDBRAKE SERVO
+            # ============================================
+
+            servo_us = joystick_to_servo_us(
+                y_percent
+            )
+
+            set_handbrake_servo_us(
+                servo_us
+            )
 
             # ============================================
             # TIMING
@@ -512,28 +725,30 @@ def run(stop_requested=None, log=print):
 
                 last_log_ms = now
 
-                message = format_revolution_log(
-                    revolutions
+                message = format_log(
+                    revolutions,
+                    y_percent,
+                    servo_us
                 )
 
-                # Print to serial console.
                 print(message)
 
-                # Send to main.py logging system.
                 if log is not print:
 
                     log(message)
 
             # ============================================
-            # OLED UPDATE
+            # OLED
             # ============================================
 
             if display_due:
 
                 last_display_ms = now
 
-                display_revolutions(
-                    revolutions
+                display_information(
+                    revolutions,
+                    y_percent,
+                    servo_us
                 )
 
             # ============================================
@@ -578,4 +793,4 @@ if __name__ == "__main__":
 
         stop_outputs()
 
-        print("Hall diagnostic stopped.")
+        print("Diagnostic stopped.")
