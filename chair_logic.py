@@ -17,6 +17,13 @@ PWM voltage below is an *average* of a 3.3 V PWM signal, not a DAC output.
 An MPU-6500-compatible device at 0x68 is expected; orientation must be
 calibrated to the physical installation before pitch/roll can be trusted.
 Yaw below is relative, gyro-integrated and drifts (no compass reference).
+
+Changes in this revision: throttle deadzone 2200, onset 1.63 V, gentler
+voltage slew (0.00025 V initial step, +0.000025 V/loop, 0.006 V max
+step), and steering no longer reverses with travel direction.
+Rear multiplier is retained, but rear output is now ramped independently
+so TERRAIN HIGH does not jump directly from zero to 2.445 V.
+IMU reference is rotated so the supplied stationary reading is level.
 """
 
 from machine import ADC, Pin, PWM, I2C, disable_irq, enable_irq
@@ -52,7 +59,7 @@ def get_wifi_status():
 # JOYSTICK CALIBRATION (UNCHANGED)
 # ============================================================
 X_LEFT, X_CENTER, X_RIGHT, X_DEADZONE = 52, 35000, 65393, 1600
-Y_BACKWARD, Y_CENTER, Y_FORWARD, Y_DEADZONE = 6632, 44581, 65384, 1600
+Y_BACKWARD, Y_CENTER, Y_FORWARD, Y_DEADZONE = 6632, 44581, 65384, 2200
 Y_FORWARD_FULL = Y_FORWARD
 x_adc, y_adc = ADC(27), ADC(28)
 
@@ -190,7 +197,7 @@ reverse_pin = Pin(8, Pin.OPEN_DRAIN, value=1)
 def select_motor_direction(direction):
     reverse_pin.value(0 if direction == 'REVERSE' else 1)
 
-MIN_MOTOR_VOLTAGE = 1.60
+MIN_MOTOR_VOLTAGE = 1.63
 ROAD_MAX_VOLTAGE = {'LOW': 1.90, 'MEDIUM': 2.20, 'HIGH': 3.30}
 # Retained legacy table name for compatibility.
 SNOW_MAX_VOLTAGE = {'LOW': 1.90, 'MEDIUM': 2.20, 'HIGH': 3.30}
@@ -198,10 +205,11 @@ TERRAIN_FRONT_MAX_VOLTAGE = 1.80
 TERRAIN_REAR_MULTIPLIER = {'LOW': 1.00, 'MEDIUM': 1.2, 'HIGH': 1.5}
 THROTTLE_EXPONENT = 2.0
 MIN_VOLTAGE_REGION = 0.05
-MOTOR_MAX_SLEW_STEP_V = 0.010
-MOTOR_START_SLEW_STEP_V = 0.0005
-MOTOR_SLEW_ACCELERATION_V = 0.00005
+MOTOR_MAX_SLEW_STEP_V = 0.006
+MOTOR_START_SLEW_STEP_V = 0.00025
+MOTOR_SLEW_ACCELERATION_V = 0.000025
 motor_current_v = 0.0
+rear_current_v = 0.0
 motor_accel_step_v = MOTOR_START_SLEW_STEP_V
 MOTOR_PWM_FREQUENCY = 20000
 motor_BR, motor_BL = PWM(Pin(17)), PWM(Pin(18))
@@ -269,9 +277,10 @@ def get_rear_voltage(front_voltage, mode, speed):
     return min(PICO_PWM_VOLTAGE, front_voltage * TERRAIN_REAR_MULTIPLIER[speed])
 
 def update_motor_voltage(target_v, mode, speed):
-    global motor_current_v, motor_accel_step_v
+    global motor_current_v, rear_current_v, motor_accel_step_v
     if target_v <= 0.0:
         motor_current_v = 0.0
+        rear_current_v = 0.0
         motor_accel_step_v = MOTOR_START_SLEW_STEP_V
         set_motor_voltages(0.0, 0.0)
         return (0.0, 0.0)
@@ -285,7 +294,18 @@ def update_motor_voltage(target_v, mode, speed):
         motor_current_v -= min(MOTOR_MAX_SLEW_STEP_V, motor_current_v - target_v)
     motor_current_v = clamp(motor_current_v, 0.0, PICO_PWM_VOLTAGE)
     front_voltage = motor_current_v
-    rear_voltage = get_rear_voltage(front_voltage, mode, speed)
+    rear_target_v = get_rear_voltage(front_voltage, mode, speed)
+    # The previous code jumped straight to 1.63*1.5 = 2.445 V at
+    # TERRAIN HIGH startup. Start rear at 1.63 V and slew independently.
+    if rear_current_v <= 0.0:
+        rear_current_v = MIN_MOTOR_VOLTAGE
+    elif rear_current_v < rear_target_v:
+        rear_current_v += min(MOTOR_MAX_SLEW_STEP_V,
+                              rear_target_v - rear_current_v)
+    else:
+        rear_current_v -= min(MOTOR_MAX_SLEW_STEP_V,
+                              rear_current_v - rear_target_v)
+    rear_voltage = clamp(rear_current_v, 0.0, PICO_PWM_VOLTAGE)
     set_motor_voltages(front_voltage, rear_voltage)
     return (front_voltage, rear_voltage)
 
@@ -327,7 +347,8 @@ def steering_to_pulse(steering_percent):
     return int(SERVO_CENTER + p / 100.0 * (SERVO_RIGHT - SERVO_CENTER))
 
 def calculate_steering(x_percent, direction):
-    return -x_percent if direction == 'REVERSE' else x_percent
+    # Steering direction remains the same when reversing.
+    return x_percent
 
 def update_servo(target_us, mode, speed, joystick_x, elapsed_ms=LOOP_PERIOD_MS):
     global servo_current_us, servo_target_filtered_us, servo_last_active_ms
@@ -438,8 +459,30 @@ try:
 except Exception as error:
     print('I2C/OLED/IMU initialization failed:', error)
 
-# IMU coordinates assume X forward, Y left, Z up. If mounted differently,
-# rotate axes here, otherwise displayed pitch/roll are not meaningful.
+# Reference acceleration recorded with the CHAIR LEVEL AND STATIONARY.
+# This defines level, but does NOT identify which way is physically forward.
+# We retain projected sensor X as nominal forward. Verify signs manually.
+IMU_LEVEL_ACCEL = (-5.11, 0.22, 8.41)
+
+def _unit(v):
+    length = sqrt(sum(c * c for c in v))
+    return tuple(c / length for c in v)
+
+# New Z is the measured upward specific-force vector when level.
+_level_z = _unit(IMU_LEVEL_ACCEL)
+# New X is the projection of the original sensor X into the level plane.
+_dot = _level_z[0]
+_level_x = _unit((1.0 - _dot * _level_z[0],
+                  -_dot * _level_z[1], -_dot * _level_z[2]))
+# New Y = Z cross X (right-handed orthonormal coordinate frame).
+_level_y = (_level_z[1]*_level_x[2] - _level_z[2]*_level_x[1],
+            _level_z[2]*_level_x[0] - _level_z[0]*_level_x[2],
+            _level_z[0]*_level_x[1] - _level_z[1]*_level_x[0])
+
+def imu_to_level(x, y, z):
+    return (x*_level_x[0] + y*_level_x[1] + z*_level_x[2],
+            x*_level_y[0] + y*_level_y[1] + z*_level_y[2],
+            x*_level_z[0] + y*_level_z[1] + z*_level_z[2])
 ACCEL_SCALE = 9.80665 / 16384.0
 GYRO_SCALE = 1.0 / 131.0
 IMU_FILTER_TAU_S = 0.6
@@ -449,6 +492,8 @@ imu_pitch = imu_roll = imu_yaw = 0.0
 imu_last_ms = None
 imu_initialized = False
 imu_last_good_ms = None
+IMU_RETRY_MS = 2000
+imu_last_retry_ms = ticks_ms()
 
 def _signed16(msb, lsb):
     value = (msb << 8) | lsb
@@ -457,9 +502,23 @@ def _signed16(msb, lsb):
 def update_imu(now):
     global imu_available, imu_ax, imu_ay, imu_az
     global imu_gx, imu_gy, imu_gz, imu_pitch, imu_roll, imu_yaw
-    global imu_last_ms, imu_initialized, imu_last_good_ms
+    global imu_last_ms, imu_initialized, imu_last_good_ms, imu_last_retry_ms
     if not imu_available:
-        return
+        if i2c is None or ticks_diff(now, imu_last_retry_ms) < IMU_RETRY_MS:
+            return
+        imu_last_retry_ms = now
+        try:
+            who = i2c.readfrom_mem(imu_address, 0x75, 1)[0]
+            if who not in (0x70, 0x68, 0x71, 0x73):
+                return
+            i2c.writeto_mem(imu_address, 0x6B, b'\x01')
+            i2c.writeto_mem(imu_address, 0x1B, b'\x00')
+            i2c.writeto_mem(imu_address, 0x1C, b'\x00')
+            i2c.writeto_mem(imu_address, 0x1A, b'\x03')
+            imu_available = True
+            imu_initialized = False
+        except Exception:
+            return
     try:
         raw = i2c.readfrom_mem(imu_address, 0x3B, 14)
         ax = _signed16(raw[0], raw[1]) * ACCEL_SCALE
@@ -468,7 +527,9 @@ def update_imu(now):
         gx = _signed16(raw[8], raw[9]) * GYRO_SCALE
         gy = _signed16(raw[10], raw[11]) * GYRO_SCALE
         gz = _signed16(raw[12], raw[13]) * GYRO_SCALE
-        # Gravity direction, assuming a stationary device / axes as above.
+        # Rotate both acceleration and angular velocity into level frame.
+        ax, ay, az = imu_to_level(ax, ay, az)
+        gx, gy, gz = imu_to_level(gx, gy, gz)
         roll_acc = atan2(ay, az) * 180.0 / pi
         pitch_acc = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0 / pi
         if not imu_initialized:
@@ -487,7 +548,9 @@ def update_imu(now):
     except Exception as error:
         # Sensor failure does not silently produce a valid tilt measurement.
         imu_available = False
-        print('IMU read failed:', error)
+        imu_initialized = False
+        imu_last_retry_ms = now
+        print('IMU read failed; retrying:', error)
 
 # ============================================================
 # OLED (6 ORIGINAL ROWS, PITCH REPLACES BRAKES)
@@ -507,7 +570,7 @@ def display_information(mode, speed, throttle, steering, reed_value, wifi_status
         oled_write('Speed:{:.1f}km/h'.format(SPEED_KMH), 1)
         oled_write('Throttle:{:+.0f}%'.format(throttle), 2)
         oled_write('Steering:{:+.0f}%'.format(steering), 3)
-        oled_write('Pitch:{:+.1f}deg'.format(imu_pitch) if imu_available and imu_initialized else 'Pitch: N/A', 4)
+        oled_write('Pitch:{:+.1f}deg'.format(imu_pitch) if imu_available and imu_initialized else 'Pitch: RETRY', 4)
         oled_write('WiFi: {}'.format(wifi_status), 5)
         oled.show()
     except Exception as error:
@@ -517,8 +580,9 @@ def display_information(mode, speed, throttle, steering, reed_value, wifi_status
 # OUTPUT STOP / MAIN LOOP
 # ============================================================
 def stop_outputs():
-    global motor_current_v, motor_accel_step_v
+    global motor_current_v, rear_current_v, motor_accel_step_v
     motor_current_v = 0.0
+    rear_current_v = 0.0
     motor_accel_step_v = MOTOR_START_SLEW_STEP_V
     disable_motors()
     select_motor_direction('FORWARD')
@@ -529,7 +593,7 @@ def stop_outputs():
 
 def run(stop_requested=None, log=print):
     global servo_current_us, servo_target_filtered_us, servo_last_active_ms
-    global motor_current_v, motor_accel_step_v
+    global motor_current_v, rear_current_v, motor_accel_step_v
     stop_outputs()
     reset_handbrake()
     servo_current_us = float(SERVO_CENTER)
@@ -607,6 +671,7 @@ def run(stop_requested=None, log=print):
                     and neutral_direction_ready and not brakes_on):
                 disable_motors()
                 motor_current_v = 0.0
+                rear_current_v = 0.0
                 motor_accel_step_v = MOTOR_START_SLEW_STEP_V
                 select_motor_direction(direction)
                 selected_motor_direction = direction
@@ -657,7 +722,7 @@ def run(stop_requested=None, log=print):
                     'ON' if reed_value == 0 else 'OFF',
                     'ON' if handbrake_value == 0 else 'OFF', get_handbrake_servo_us(),
                     imu_ax, imu_ay, imu_az, imu_pitch, imu_roll, imu_yaw,
-                    'OK' if imu_available and imu_initialized else 'N/A', wifi_status))
+                    'OK' if imu_available and imu_initialized else 'RETRY', wifi_status))
             if display_due:
                 last_display_ms = now
                 display_information(mode, speed, signed_throttle, steering_percent,
