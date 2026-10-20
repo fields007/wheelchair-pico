@@ -1,5 +1,6 @@
 """TEMPORARY joystick calibration replacement for chair_logic.py.
 
+Measures center again after each extreme to estimate deadzones.
 No PWM outputs are initialized or commanded. Keep the chair immobilized,
 traction power disconnected, and nobody seated during calibration.
 
@@ -33,13 +34,18 @@ except Exception as exc:
     print('OLED unavailable:', repr(exc))
 
 # Sampling instructions: joystick should be held at the requested limit
-# for the entire 5-second measurement interval.
+# for the entire 5-second measurement interval; for CENTER, release it.
 STEPS = (
     ('CENTER', 'Release joystick'),
     ('LEFT', 'Hold full LEFT'),
+    ('CENTER_AFTER_LEFT', 'Release joystick'),
     ('RIGHT', 'Hold full RIGHT'),
+    ('CENTER_AFTER_RIGHT', 'Release joystick'),
     ('FORWARD', 'Hold full FORWARD'),
+    ('CENTER_AFTER_FORWARD', 'Release joystick'),
     ('BACKWARD', 'Hold full BACK'),
+    # Repeated release-to-center samples capture mechanical return variation.
+    ('CENTER_AFTER_BACK', 'Release joystick'),
 )
 
 
@@ -130,8 +136,30 @@ def measure(step_name, instruction, stop_requested):
     return stats(xs), stats(ys)
 
 
+def suggest_deadzones(results):
+    """Conservative center jitter + return hysteresis deadzones in ADC counts.
+
+    Center positions are sampled at rest and after releasing each direction.
+    A deadzone must exceed observed center spread; this estimate is NOT a
+    measurement of user-intended minimum deflection or electrical faults.
+    """
+    centers = [name for name, _ in STEPS if name.startswith('CENTER')]
+    x_center = results['CENTER'][0]['mean']
+    y_center = results['CENTER'][1]['mean']
+    def calc(axis, reference):
+        maximum = max(max(abs(results[name][axis]['min'] - reference),
+                          abs(results[name][axis]['max'] - reference))
+                      for name in centers)
+        largest_std = max(results[name][axis]['std'] for name in centers)
+        # At least 150 ADC counts, 25% above observed maximum drift,
+        # and 4 standard deviations from the noisiest center hold.
+        deadzone = int(max(150, 1.25 * maximum, 4 * largest_std) + 0.5)
+        return deadzone, maximum, largest_std
+    return calc(0, x_center), calc(1, y_center)
+
+
 def run(stop_requested=None, log=print):
-    """Wait for Wi-Fi, then perform five 5s prepare + 5s measure steps.
+    """Wait for Wi-Fi, then perform nine 5s prepare + 5s measure steps.
 
     The supervisor must pass an MQTT-forwarding log callback if remote
     delivery is desired. Wi-Fi ONLINE alone does not establish MQTT status.
@@ -170,6 +198,7 @@ def run(stop_requested=None, log=print):
         lines.append(name)
         lines.append(format_stats('X', xstat))
         lines.append(format_stats('Y', ystat))
+    (xd, xmax, xstd), (yd, ymax, ystd) = suggest_deadzones(results)
     lines.extend([
         'SUGGESTED JOYSTICK CALIBRATION (rounded means):',
         'X_LEFT = {}'.format(round(results['LEFT'][0]['mean'])),
@@ -178,7 +207,13 @@ def run(stop_requested=None, log=print):
         'Y_BACKWARD = {}'.format(round(results['BACKWARD'][1]['mean'])),
         'Y_CENTER = {}'.format(round(results['CENTER'][1]['mean'])),
         'Y_FORWARD = {}'.format(round(results['FORWARD'][1]['mean'])),
-        'NOTE: Choose deadzones after inspecting CENTER spread.',
+        'SUGGESTED DEADZONES (ADC counts; center jitter + release hysteresis):',
+        'X_DEADZONE = {}'.format(xd),
+        'Y_DEADZONE = {}'.format(yd),
+        'Center X maximum observed deviation {:.1f}, maximum std {:.1f}'.format(xmax, xstd),
+        'Center Y maximum observed deviation {:.1f}, maximum std {:.1f}'.format(ymax, ystd),
+        'Rule: max(150, 1.25 * maximum center deviation, 4 * max center std)',
+        'These are estimated minimum stable deadzones, not tested driving thresholds.',
         '=== END JOYSTICK CALIBRATION REPORT ==='])
     report = '\n'.join(lines)
     print(report)
