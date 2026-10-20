@@ -1,231 +1,239 @@
-"""TEMPORARY joystick calibration replacement for chair_logic.py.
+"""Wheelchair OLED DESIGN MOCK for Pico 2 W, SSD1306 128x64.
 
-Measures center again after each extreme to estimate deadzones.
-No PWM outputs are initialized or commanded. Keep the chair immobilized,
-traction power disconnected, and nobody seated during calibration.
+Display only: NO traction/steering/brake actuator GPIO is configured.
+Run directly in Thonny with ssd1306.py on the Pico, or temporarily use
+as chair_logic.py with existing supervisor calling run(stop_requested,log).
+All numbers are fictional and change automatically every few seconds.
 
-Compatible with supervisor calls run(stop_requested=..., log=...).
-Starts only when Wi-Fi station reports connected; that does NOT prove MQTT
-is connected or that the supervisor's log callback forwards to MQTT.
-The complete report is passed to log() once, and also printed locally.
+Layout uses x=8..119 and y=7..56 to avoid rounded/cut-off corners.
+The functional sections below are intentionally empty placeholders.
 """
-from machine import ADC, Pin, I2C
-from time import ticks_ms, ticks_diff, sleep_ms
-from math import sqrt
-try:
-    import network
-except ImportError:
-    network = None
+from machine import Pin, I2C
+from time import sleep_ms, ticks_ms, ticks_diff
+import framebuf
+import ssd1306
 
-X = ADC(27)
-Y = ADC(28)
-BRAKE = Pin(1, Pin.IN, Pin.PULL_UP)
-WAIT_MS = 5000
-MEASURE_MS = 5000
-SAMPLE_MS = 20
-OLED_ADDR = 0x3C
-OLED = None
-try:
-    import ssd1306
-    bus = I2C(0, sda=Pin(20), scl=Pin(21), freq=50000)
-    if OLED_ADDR in bus.scan():
-        OLED = ssd1306.SSD1306_I2C(128, 64, bus, addr=OLED_ADDR)
-except Exception as exc:
-    print('OLED unavailable:', repr(exc))
+# ============================================================
+# 1. HARDWARE MAP AND CALIBRATED INPUT VALUES (NOT USED IN DEMO)
+# ============================================================
+PIN_HAND_BRAKE_BUTTON = 0
+PIN_BRAKE_REED = 1               # LOW = brakes engaged
+PIN_SPEED_A, PIN_SPEED_B = 2, 19
+PIN_MODE_A, PIN_MODE_B = 4, 7
+PIN_REVERSE = 8
+PIN_STEERING_SERVO = 9
+PIN_HALL_FR, PIN_HALL_BR, PIN_HALL_FL, PIN_HALL_BL = 10, 11, 12, 13
+PIN_MOTOR_FR, PIN_MOTOR_FL, PIN_MOTOR_BR, PIN_MOTOR_BL = 14, 15, 17, 18
+PIN_I2C_SDA, PIN_I2C_SCL = 20, 21
+PIN_HANDBRAKE_SERVO = 22
+PIN_WIFI_BUTTON = 26            # Owned by supervisor
+PIN_JOYSTICK_X, PIN_JOYSTICK_Y = 27, 28
 
-# Sampling instructions: joystick should be held at the requested limit
-# for the entire 5-second measurement interval; for CENTER, release it.
-STEPS = (
-    ('CENTER', 'Release joystick'),
-    ('LEFT', 'Hold full LEFT'),
-    ('CENTER_AFTER_LEFT', 'Release joystick'),
-    ('RIGHT', 'Hold full RIGHT'),
-    ('CENTER_AFTER_RIGHT', 'Release joystick'),
-    ('FORWARD', 'Hold full FORWARD'),
-    ('CENTER_AFTER_FORWARD', 'Release joystick'),
-    ('BACKWARD', 'Hold full BACK'),
-    # Repeated release-to-center samples capture mechanical return variation.
-    ('CENTER_AFTER_BACK', 'Release joystick'),
+X_LEFT, X_CENTER, X_RIGHT, X_DEADZONE = 0, 33815, 65351, 2941
+Y_BACKWARD, Y_CENTER, Y_FORWARD, Y_DEADZONE = 5401, 43529, 65340, 599
+IMU_I2C_ADDRESS = 0x68
+OLED_I2C_ADDRESS = 0x3C
+
+# ============================================================
+# 2. FUTURE IMU LOGIC -- paste stable calibration/filter here
+# ============================================================
+# Interface idea: get_pitch_degrees() -> float
+# Stationary-only outlier rejection must NOT be reused as driving safety logic.
+
+# ============================================================
+# 3. FUTURE THROTTLE LOGIC -- joystick, ramps, motor PWM
+# ============================================================
+# Interface idea: get_throttle_request() -> float (0..1)
+# Motor enable must be guarded by the actual brake input and failsafe logic.
+
+# ============================================================
+# 4. FUTURE STEERING LOGIC -- joystick and steering servo
+# ============================================================
+
+# ============================================================
+# 5. FUTURE BRAKE LOGIC -- reed interlock + handbrake servo
+# ============================================================
+# Actual braking interlock must disable traction independently of the OLED.
+# Define brake_on and throttle_requested separately for display warning.
+
+# ============================================================
+# 6. FUTURE WHEEL SPEED LOGIC -- four Hall sensors
+# ============================================================
+# 8 magnets/revolution, 16 transitions/revolution; wheel radius ~0.225 m.
+
+# ============================================================
+# 7. DISPLAY STATE -- future logic should update these fields
+# ============================================================
+class DisplayState:
+    def __init__(self):
+        self.pitch_deg = 0.0
+        self.mode = 'TERRAIN'     # TERRAIN / DIFFERENTIAL / ROAD
+        self.speed_setting = 'LOW'  # LOW / MED / HIGH
+        self.speed_kmh = 0.0
+        self.throttle_requested = False
+        self.brake_on = False
+        self.mode_changed = False
+        self.speed_changed = False
+
+# ============================================================
+# 8. OLED FONT AND DRAWING -- display-only functions
+# ============================================================
+WIDTH, HEIGHT = 128, 64
+SAFE_LEFT, SAFE_RIGHT = 8, 119
+SAFE_TOP, SAFE_BOTTOM = 7, 56
+DISPLAY_INTERVAL_MS = 100
+
+# Use built-in 8x8 framebuf font; scale pixels in software, no extra fonts.
+_glyph = bytearray(8)
+_glyph_fb = framebuf.FrameBuffer(_glyph, 8, 8, framebuf.MONO_HLSB)
+
+
+def draw_text(oled, value, x, y, scale=1):
+    value = str(value)
+    for index, ch in enumerate(value):
+        _glyph_fb.fill(0)
+        _glyph_fb.text(ch, 0, 0, 1)
+        for py in range(8):
+            for px in range(8):
+                if _glyph_fb.pixel(px, py):
+                    oled.fill_rect(x + index*8*scale + px*scale,
+                                   y + py*scale, scale, scale, 1)
+
+
+def centered(oled, value, y, scale=1):
+    value = str(value)
+    width = len(value) * 8 * scale
+    x = (WIDTH - width) // 2
+    if x < SAFE_LEFT or x + width - 1 > SAFE_RIGHT:
+        # Shrink rather than draw into the clipped corners.
+        scale = 1
+        width = len(value) * 8
+        x = (WIDTH - width) // 2
+    draw_text(oled, value, x, y, scale)
+
+
+def mode_short(mode):
+    return {'TERRAIN': 'TERRAIN', 'DIFFERENTIAL': 'DIFF',
+            'ROAD': 'ROAD'}.get(mode, str(mode)[:10])
+
+
+def draw_idle(oled, state):
+    centered(oled, 'SLOPE', 8, 1)
+    # 16 px tall; enough room for a signed pitch angle.
+    pitch = '{:+.1f}'.format(state.pitch_deg)
+    centered(oled, pitch, 22, 2)
+    centered(oled, 'deg', 40, 1)
+    centered(oled, '{}  {}'.format(mode_short(state.mode),
+                                   state.speed_setting), 49, 1)
+
+
+def draw_driving(oled, state):
+    centered(oled, 'SPEED', 8, 1)
+    # e.g. '12.4' at 2x => 64 px wide; legible without corner clipping.
+    centered(oled, '{:.1f}'.format(state.speed_kmh), 20, 2)
+    centered(oled, 'km/h', 39, 1)
+    centered(oled, '{}  {}'.format(mode_short(state.mode),
+                                   state.speed_setting), 49, 1)
+
+
+def draw_change(oled, label, value):
+    centered(oled, label, 10, 1)
+    # Long names stay at 1x; shorter names become 2x.
+    scale = 2 if len(value) <= 7 else 1
+    centered(oled, value, 29 if scale == 2 else 32, scale)
+
+
+def draw_brake_warning(oled):
+    centered(oled, 'THROTTLE', 9, 1)
+    centered(oled, 'OFF', 21, 2)
+    centered(oled, 'BRAKES ON', 44, 1)
+
+
+def draw_screen(oled, state):
+    oled.fill(0)
+    # Warning wins over all other screens.
+    if state.brake_on and state.throttle_requested:
+        draw_brake_warning(oled)
+    elif state.mode_changed:
+        draw_change(oled, 'MODE', mode_short(state.mode))
+    elif state.speed_changed:
+        draw_change(oled, 'SETTING', state.speed_setting)
+    elif state.throttle_requested:
+        draw_driving(oled, state)
+    else:
+        draw_idle(oled, state)
+    oled.show()
+
+# ============================================================
+# 9. MOCK SCENES -- replace this with real sensor/logic state later
+# ============================================================
+# (duration in seconds, pitch, mode, setting, km/h, throttle, brake,
+#  mode-change, speed-change)
+MOCK_SCENES = (
+    (5,  0.0, 'TERRAIN', 'LOW',  0.0, False, False, False, False),
+    (5, +8.4, 'TERRAIN', 'LOW',  0.0, False, False, False, False),
+    (5, +8.4, 'TERRAIN', 'LOW',  7.2, True,  False, False, False),
+    (3, +8.4, 'ROAD',    'LOW',  7.2, True,  False, True,  False),
+    (5, +8.4, 'ROAD',    'LOW', 12.4, True,  False, False, False),
+    (3, +8.4, 'ROAD',    'HIGH',12.4, True,  False, False, True),
+    (5, +8.4, 'ROAD',    'HIGH',18.6, True,  False, False, False),
+    (5, +8.4, 'ROAD',    'HIGH', 0.0, True,  True,  False, False),
+    (5, -3.2, 'ROAD',    'HIGH', 0.0, False, True,  False, False),
+    (3, -3.2, 'DIFFERENTIAL', 'MED', 0.0, False, False, True, False),
+    (5, -3.2, 'DIFFERENTIAL', 'MED', 0.0, False, False, False, False),
 )
 
 
+def mock_state(elapsed_ms):
+    cycle_ms = sum(scene[0] for scene in MOCK_SCENES) * 1000
+    t = elapsed_ms % cycle_ms
+    chosen = MOCK_SCENES[-1]
+    for scene in MOCK_SCENES:
+        duration_ms = scene[0] * 1000
+        if t < duration_ms:
+            chosen = scene
+            break
+        t -= duration_ms
+    s = DisplayState()
+    (_, s.pitch_deg, s.mode, s.speed_setting, s.speed_kmh,
+     s.throttle_requested, s.brake_on, s.mode_changed,
+     s.speed_changed) = chosen
+    return s
+
+# ============================================================
+# 10. SUPERVISOR COMPATIBILITY -- stop_requested/log signatures
+# ============================================================
+_i2c = None
+_oled = None
+
+
 def stop_outputs():
-    """No motor/servo PWM exists in this diagnostic module."""
-    return
-
-
-def online():
-    try:
-        return network is not None and network.WLAN(network.STA_IF).isconnected()
-    except Exception:
-        return False
-
-
-def display(*lines):
-    if OLED is None:
-        return
-    try:
-        OLED.fill(0)
-        for i, line in enumerate(lines[:6]):
-            OLED.text(str(line)[:16], 0, i * 10)
-        OLED.show()
-    except Exception as exc:
-        print('OLED error:', repr(exc))
-
-
-def stats(values):
-    n = len(values)
-    if not n:
-        return None
-    avg = sum(values) / n
-    var = sum((v - avg) ** 2 for v in values) / n
-    s = sorted(values)
-    return {'n': n, 'mean': avg, 'std': sqrt(var), 'min': s[0],
-            'max': s[-1], 'p05': s[int((n - 1) * 0.05)],
-            'median': s[n // 2], 'p95': s[int((n - 1) * 0.95)]}
-
-
-def format_stats(label, data):
-    return ('  {}: n={} mean={:.1f} std={:.1f} min={} p05={} '
-            'median={} p95={} max={}').format(
-        label, data['n'], data['mean'], data['std'], data['min'],
-        data['p05'], data['median'], data['p95'], data['max'])
-
-
-def wait_for_interval(ms, step_name, instruction, phase, stop_requested):
-    start = ticks_ms()
-    last_second = -1
-    while ticks_diff(ticks_ms(), start) < ms:
-        if stop_requested is not None and stop_requested():
-            return False
-        if not online():
-            return False
-        elapsed = ticks_diff(ticks_ms(), start)
-        remaining = max(0, (ms - elapsed + 999) // 1000)
-        if remaining != last_second:
-            last_second = remaining
-            display('JOYSTICK CAL', step_name, instruction,
-                    '{}: {}s'.format(phase, remaining),
-                    'Brake:{}'.format('ON' if BRAKE.value() == 0 else 'OFF'),
-                    'WiFi:ONLINE')
-            print('{}: {} - {} ({}s)'.format(phase, step_name, instruction, remaining))
-        sleep_ms(40)
-    return True
-
-
-def measure(step_name, instruction, stop_requested):
-    xs, ys = [], []
-    start = ticks_ms()
-    last_second = -1
-    while ticks_diff(ticks_ms(), start) < MEASURE_MS:
-        if stop_requested is not None and stop_requested():
-            return None
-        if not online():
-            return None
-        xs.append(X.read_u16())
-        ys.append(Y.read_u16())
-        elapsed = ticks_diff(ticks_ms(), start)
-        remaining = max(0, (MEASURE_MS - elapsed + 999) // 1000)
-        if remaining != last_second:
-            last_second = remaining
-            display('JOYSTICK CAL', step_name, instruction,
-                    'MEASURE: {}s'.format(remaining),
-                    'X:{} Y:{}'.format(xs[-1], ys[-1]),
-                    'Brake:{}'.format('ON' if BRAKE.value() == 0 else 'OFF'))
-        sleep_ms(SAMPLE_MS)
-    return stats(xs), stats(ys)
-
-
-def suggest_deadzones(results):
-    """Conservative center jitter + return hysteresis deadzones in ADC counts.
-
-    Center positions are sampled at rest and after releasing each direction.
-    A deadzone must exceed observed center spread; this estimate is NOT a
-    measurement of user-intended minimum deflection or electrical faults.
-    """
-    centers = [name for name, _ in STEPS if name.startswith('CENTER')]
-    x_center = results['CENTER'][0]['mean']
-    y_center = results['CENTER'][1]['mean']
-    def calc(axis, reference):
-        maximum = max(max(abs(results[name][axis]['min'] - reference),
-                          abs(results[name][axis]['max'] - reference))
-                      for name in centers)
-        largest_std = max(results[name][axis]['std'] for name in centers)
-        # At least 150 ADC counts, 25% above observed maximum drift,
-        # and 4 standard deviations from the noisiest center hold.
-        deadzone = int(max(150, 1.25 * maximum, 4 * largest_std) + 0.5)
-        return deadzone, maximum, largest_std
-    return calc(0, x_center), calc(1, y_center)
+    """No actuator outputs are created by this display-only demo."""
+    pass
 
 
 def run(stop_requested=None, log=print):
-    """Wait for Wi-Fi, then perform nine 5s prepare + 5s measure steps.
-
-    The supervisor must pass an MQTT-forwarding log callback if remote
-    delivery is desired. Wi-Fi ONLINE alone does not establish MQTT status.
-    """
-    stop_outputs()
-    print('Joystick calibration ready. No motor or servo outputs enabled.')
-    display('JOYSTICK CAL', 'Waiting for WiFi', 'NO MOTOR OUTPUT')
-    while not online():
-        if stop_requested is not None and stop_requested():
-            return
-        sleep_ms(200)
-    print('Wi-Fi connected. Beginning calibration.')
-    results = {}
-    for name, instruction in STEPS:
-        if not wait_for_interval(WAIT_MS, name, instruction, 'PREPARE', stop_requested):
-            print('Calibration aborted (stop request or Wi-Fi disconnected).')
-            display('CAL ABORTED', 'No report sent')
-            return
-        sample = measure(name, instruction, stop_requested)
-        if sample is None:
-            print('Calibration aborted (stop request or Wi-Fi disconnected).')
-            display('CAL ABORTED', 'No report sent')
-            return
-        results[name] = sample
-        print('{} complete: X mean {:.1f}, Y mean {:.1f}'.format(
-            name, sample[0]['mean'], sample[1]['mean']))
-
-    lines = ['=== JOYSTICK CALIBRATION REPORT ===',
-             'WiFi connected at report time: {}'.format(online()),
-             'GP27 = X, GP28 = Y; ADC 0..65535',
-             'Preparation: {}s; measurement: {}s per position'.format(
-                 WAIT_MS // 1000, MEASURE_MS // 1000),
-             'Brake GP1: {}'.format('ON' if BRAKE.value() == 0 else 'OFF')]
-    for name, _ in STEPS:
-        xstat, ystat = results[name]
-        lines.append(name)
-        lines.append(format_stats('X', xstat))
-        lines.append(format_stats('Y', ystat))
-    (xd, xmax, xstd), (yd, ymax, ystd) = suggest_deadzones(results)
-    lines.extend([
-        'SUGGESTED JOYSTICK CALIBRATION (rounded means):',
-        'X_LEFT = {}'.format(round(results['LEFT'][0]['mean'])),
-        'X_CENTER = {}'.format(round(results['CENTER'][0]['mean'])),
-        'X_RIGHT = {}'.format(round(results['RIGHT'][0]['mean'])),
-        'Y_BACKWARD = {}'.format(round(results['BACKWARD'][1]['mean'])),
-        'Y_CENTER = {}'.format(round(results['CENTER'][1]['mean'])),
-        'Y_FORWARD = {}'.format(round(results['FORWARD'][1]['mean'])),
-        'SUGGESTED DEADZONES (ADC counts; center jitter + release hysteresis):',
-        'X_DEADZONE = {}'.format(xd),
-        'Y_DEADZONE = {}'.format(yd),
-        'Center X maximum observed deviation {:.1f}, maximum std {:.1f}'.format(xmax, xstd),
-        'Center Y maximum observed deviation {:.1f}, maximum std {:.1f}'.format(ymax, ystd),
-        'Rule: max(150, 1.25 * maximum center deviation, 4 * max center std)',
-        'These are estimated minimum stable deadzones, not tested driving thresholds.',
-        '=== END JOYSTICK CALIBRATION REPORT ==='])
-    report = '\n'.join(lines)
-    print(report)
-    display('CAL COMPLETE', 'Report sent to', 'log callback', 'See console')
-    # Single log callback invocation as requested. Some MQTT pipelines
-    # limit message size; check actual receipt at broker/subscriber.
+    global _i2c, _oled
+    # Display-only: initialize GP20/21, no other pins.
+    _i2c = I2C(0, sda=Pin(PIN_I2C_SDA), scl=Pin(PIN_I2C_SCL), freq=50000)
+    _oled = ssd1306.SSD1306_I2C(WIDTH, HEIGHT, _i2c, addr=OLED_I2C_ADDRESS)
+    start = ticks_ms()
+    last_frame = start - DISPLAY_INTERVAL_MS
+    log('OLED design mock started; motors and servos NOT initialized')
     try:
-        log(report)
-    except Exception as exc:
-        print('LOG CALLBACK FAILED:', repr(exc))
-        display('LOG SEND FAILED', 'See console')
-    return
+        while True:
+            if stop_requested is not None and stop_requested():
+                break
+            now = ticks_ms()
+            if ticks_diff(now, last_frame) >= DISPLAY_INTERVAL_MS:
+                state = mock_state(ticks_diff(now, start))
+                draw_screen(_oled, state)
+                last_frame = now
+            sleep_ms(20)
+    finally:
+        _oled.fill(0)
+        _oled.show()
+        stop_outputs()
 
 
 if __name__ == '__main__':
