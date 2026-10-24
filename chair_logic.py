@@ -670,17 +670,25 @@ def mode_short(mode):
 
 
 def draw_idle(oled, state):
-    # Three equally weighted, centered rows inside the safe OLED area.
-    # Each uses the same 8-pixel font; no value dominates the others.
+    # Four evenly spaced rows within the OLED safe area.
+    # Each row uses the standard 8-pixel font.
+
+    # Row 1: Slope
     if state.imu_ok:
         text = 'slope: {:+.1f}'.format(state.pitch_deg)
         x = (WIDTH - (len(text) * 8 + 4)) // 2
-        draw_text(oled, text, x, 12)
-        draw_degree(oled, x + len(text) * 8, 12)
+        draw_text(oled, text, x, 8)
+        draw_degree(oled, x + len(text) * 8, 8)
     else:
-        centered(oled, 'SLOPE N/A', 12)
-    centered(oled, 'mode:  {}'.format(mode_short(state.mode)), 28, 1)
-    centered(oled, 'speed: {}'.format(state.speed_setting), 44, 1)
+        centered(oled, 'slope: N/A', 8)
+
+    # Row 2: Mode
+    centered(oled, 'mode: {}'.format(mode_short(state.mode)), 20)
+
+    # Row 3: Speed setting
+    centered(oled, 'speed: {}'.format(state.speed_setting), 32)
+
+    # Row 4: Network status
     centered(oled, 'ONLINE' if state.online else 'OFFLINE', 44)
 
 
