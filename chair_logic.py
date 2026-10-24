@@ -879,11 +879,11 @@ def run(stop_requested=None, log=print):
                 requested_direction != selected_direction
             )
 
-            # Apply the physical direction change while the brakes are engaged.
             if direction_change_pending:
                 reset_motor_ramp()
 
-                if brakes_on:
+                # Switch direction once the wheels are stationary.
+                if all(abs(rpm) < 0.5 for rpm in hall_rpm):
                     select_motor_direction(requested_direction)
                     selected_direction = requested_direction
                     direction_change_pending = False
