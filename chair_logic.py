@@ -790,6 +790,8 @@ def run(stop_requested=None, log=print):
     global _display_mode_changed_at, _display_speed_changed_at
     global _display_smoothed_kmh
 
+    stop_outputs()
+
     throttle_armed = False
     neutral_since_ms = None
 
@@ -869,22 +871,23 @@ def run(stop_requested=None, log=print):
                 else:
                     neutral_since_ms = None
 
-            # Accept direction requests immediately, without a neutral dwell.
+            # Track joystick direction immediately, including while braking.
             if direction != 'NEUTRAL':
-                if direction != requested_direction:
-                    requested_direction = direction
+                requested_direction = direction
 
-                    # Remove the previous motor command immediately.
-                    reset_motor_ramp()
+            direction_change_pending = (
+                requested_direction != selected_direction
+            )
 
-                    # Prevent throttle until the direction transition is safe.
-                    direction_change_pending = (
-                        requested_direction != selected_direction
-                    )
-
-            # A pending direction change must not produce motor torque.
+            # Apply the physical direction change while the brakes are engaged.
             if direction_change_pending:
                 reset_motor_ramp()
+
+                if brakes_on:
+                    select_motor_direction(requested_direction)
+                    selected_direction = requested_direction
+                    direction_change_pending = False
+                    log('Motor direction: {}'.format(selected_direction))
 
             drive_allowed = (
                 throttle_armed
