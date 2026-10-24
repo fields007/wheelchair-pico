@@ -797,13 +797,10 @@ def update_display_state(state, now, mode=None, speed=None, y=None):
 _i2c = None
 _oled = None
 # Time for the motor controllers to recognize a new direction.
-DIRECTION_SETTLE_MS = 500
-
-# Require the requested direction to remain stable.
-DIRECTION_DEBOUNCE_MS = 50
+DIRECTION_SETTLE_MS = 0
 
 # Minimum time with throttle disabled before switching direction.
-DIRECTION_PWM_OFF_MS = 300
+DIRECTION_PWM_OFF_MS = 0
 
 # Maximum allowed wheel speed before switching direction.
 DIRECTION_MAX_SWITCH_RPM = 0.5
@@ -832,9 +829,6 @@ def run(stop_requested=None, log=print):
     # No direction is considered ready at startup.
     selected_direction = None
     requested_direction = None
-
-    direction_candidate = None
-    direction_candidate_since = None
 
     direction_state = 'WAIT_REQUEST'
     direction_state_since = ticks_ms()
@@ -906,21 +900,11 @@ def run(stop_requested=None, log=print):
             # ROBUST MOTOR DIRECTION CONTROL
             # ============================================================
 
-            # 1. Debounce the requested direction.
-            if direction != direction_candidate:
-                direction_candidate = direction
-                direction_candidate_since = loop_start
-
-            if (
-                direction_candidate in ('FORWARD', 'REVERSE')
-                and ticks_diff(
-                    loop_start, direction_candidate_since
-                ) >= DIRECTION_DEBOUNCE_MS
-            ):
-                requested_direction = direction_candidate
-
-            elif direction_candidate == 'NEUTRAL':
-                requested_direction = None
+            # 1. Read joystick direction without temporal debounce.
+            requested_direction = (
+                direction if direction in ('FORWARD', 'REVERSE')
+                else None
+            )
 
 
             # 2. Begin a direction-change sequence whenever necessary.
@@ -952,7 +936,10 @@ def run(stop_requested=None, log=print):
                 )
 
                 if requested_direction is None:
-                    direction_state = 'WAIT_REQUEST'
+                    if selected_direction is None:
+                        direction_state = 'WAIT_REQUEST'
+                    else:
+                        direction_state = 'READY'
 
                 elif wheels_stopped and pwm_off_long_enough:
 
