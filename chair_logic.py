@@ -789,7 +789,7 @@ def update_display_state(state, now, mode=None, speed=None, y=None):
 # ============================================================
 _i2c = None
 _oled = None
-THROTTLE_ARM_NEUTRAL_MS = 500
+THROTTLE_ARM_NEUTRAL_MS = 0
 DIAGNOSTIC_INTERVAL_MS = 1000
 
 
