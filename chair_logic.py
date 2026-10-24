@@ -298,10 +298,17 @@ def get_direction(y_percent):
         return 'REVERSE'
     return 'NEUTRAL'
 
+# GP8: LOW = REVERSE, released = FORWARD.
+# Requires a suitable external 3.3 V pull-up.
 reverse_pin = Pin(PIN_REVERSE, Pin.OPEN_DRAIN, value=1)
 
 def select_motor_direction(direction):
-    reverse_pin.value(0 if direction == 'REVERSE' else 1)
+    if direction == 'REVERSE':
+        reverse_pin.value(0)
+    elif direction == 'FORWARD':
+        reverse_pin.value(1)
+    else:
+        raise ValueError('Invalid motor direction')
 
 MIN_MOTOR_VOLTAGE = 1.63
 ROAD_MAX_VOLTAGE = {'LOW': 1.90, 'MEDIUM': 2.20, 'HIGH': 3.30}
@@ -789,16 +796,27 @@ def update_display_state(state, now, mode=None, speed=None, y=None):
 # ============================================================
 _i2c = None
 _oled = None
-THROTTLE_ARM_NEUTRAL_MS = 0
+# Time for the motor controllers to recognize a new direction.
+DIRECTION_SETTLE_MS = 500
+
+# Require the requested direction to remain stable.
+DIRECTION_DEBOUNCE_MS = 50
+
+# Minimum time with throttle disabled before switching direction.
+DIRECTION_PWM_OFF_MS = 300
+
+# Maximum allowed wheel speed before switching direction.
+DIRECTION_MAX_SWITCH_RPM = 0.5
+
 DIAGNOSTIC_INTERVAL_MS = 1000
 
 
 def stop_outputs():
-    # Called by the supervisor and on all normal/exceptional exits.
+    # Disable motor torque without unnecessarily changing direction.
     reset_motor_ramp()
-    select_motor_direction('FORWARD')
     disable_servo()
-    # Disable the handbrake servo signal; mechanical position is NOT verified.
+
+    # Disable handbrake servo signal.
     handbrake_pwm.duty_u16(0)
 
 
@@ -811,12 +829,17 @@ def run(stop_requested=None, log=print):
 
     stop_outputs()
 
-    throttle_armed = False
-    neutral_since_ms = None
+    # No direction is considered ready at startup.
+    selected_direction = None
+    requested_direction = None
 
-    requested_direction = 'FORWARD'
-    selected_direction = 'FORWARD'
-    direction_change_pending = False
+    direction_candidate = None
+    direction_candidate_since = None
+
+    direction_state = 'WAIT_REQUEST'
+    direction_state_since = ticks_ms()
+
+    # Traction remains disabled until direction selection is complete.
 
     last_servo_ms = ticks_ms()
     last_display_ms = ticks_ms() - DISPLAY_INTERVAL_MS
@@ -847,7 +870,7 @@ def run(stop_requested=None, log=print):
         servo_target_filtered_us = float(SERVO_CENTER)
         servo_last_active_ms = ticks_ms()
         set_servo_us(SERVO_CENTER)
-        log('Wheelchair control loop started; neutral arming required')
+        log('Wheelchair control loop started; direction interlock active')
 
         while True:
             loop_start = ticks_ms()
@@ -877,48 +900,120 @@ def run(stop_requested=None, log=print):
                          x, elapsed)
 
             if brakes_on:
-                throttle_armed = False
-                neutral_since_ms = None
                 reset_motor_ramp()
 
-            if not throttle_armed and not brakes_on:
-                if joystick_neutral:
-                    if neutral_since_ms is None:
-                        neutral_since_ms = loop_start
-                    elif ticks_diff(loop_start, neutral_since_ms) >= THROTTLE_ARM_NEUTRAL_MS:
-                        throttle_armed = True
-                else:
-                    neutral_since_ms = None
+            # ============================================================
+            # ROBUST MOTOR DIRECTION CONTROL
+            # ============================================================
 
-            # Track joystick direction immediately, including while braking.
-            if direction != 'NEUTRAL':
-                requested_direction = direction
+            # 1. Debounce the requested direction.
+            if direction != direction_candidate:
+                direction_candidate = direction
+                direction_candidate_since = loop_start
 
-            direction_change_pending = (
-                requested_direction != selected_direction
-            )
+            if (
+                direction_candidate in ('FORWARD', 'REVERSE')
+                and ticks_diff(
+                    loop_start, direction_candidate_since
+                ) >= DIRECTION_DEBOUNCE_MS
+            ):
+                requested_direction = direction_candidate
 
-            if direction_change_pending:
+            elif direction_candidate == 'NEUTRAL':
+                requested_direction = None
+
+
+            # 2. Begin a direction-change sequence whenever necessary.
+            if (
+                requested_direction is not None
+                and requested_direction != selected_direction
+                and direction_state in ('READY', 'WAIT_REQUEST')
+            ):
                 reset_motor_ramp()
-                select_motor_direction(requested_direction)
-                selected_direction = requested_direction
-                direction_change_pending = False
-                log('Motor direction: {}'.format(selected_direction))
+                direction_state = 'PWM_OFF'
+                direction_state_since = loop_start
 
+
+            # 3. Direction-change state machine.
+            if direction_state == 'PWM_OFF':
+
+                reset_motor_ramp()
+
+                # Do not switch direction while wheels are moving.
+                wheels_stopped = all(
+                    abs(rpm) <= DIRECTION_MAX_SWITCH_RPM
+                    for rpm in hall_rpm
+                )
+
+                pwm_off_long_enough = (
+                    ticks_diff(
+                        loop_start, direction_state_since
+                    ) >= DIRECTION_PWM_OFF_MS
+                )
+
+                if requested_direction is None:
+                    direction_state = 'WAIT_REQUEST'
+
+                elif wheels_stopped and pwm_off_long_enough:
+
+                    select_motor_direction(requested_direction)
+
+                    selected_direction = requested_direction
+
+                    direction_state = 'SETTLING'
+                    direction_state_since = loop_start
+
+                    log(
+                        'Motor direction selected: {}'.format(
+                            selected_direction
+                        )
+                    )
+
+
+            elif direction_state == 'SETTLING':
+
+                reset_motor_ramp()
+
+                # If the joystick requests the opposite direction,
+                # restart the safe switching sequence.
+                if (
+                    requested_direction is not None
+                    and requested_direction != selected_direction
+                ):
+                    direction_state = 'PWM_OFF'
+                    direction_state_since = loop_start
+
+                elif ticks_diff(
+                    loop_start, direction_state_since
+                ) >= DIRECTION_SETTLE_MS:
+
+                    direction_state = 'READY'
+
+
+            elif direction_state == 'WAIT_REQUEST':
+
+                reset_motor_ramp()
+
+
+            # 4. Enable traction only when direction selection is complete.
             drive_allowed = (
-                throttle_armed
+                direction_state == 'READY'
                 and not brakes_on
-                and not direction_change_pending
                 and direction != 'NEUTRAL'
                 and direction == selected_direction
+                and requested_direction == selected_direction
             )
-            target = joystick_to_motor_voltage(y, mode, speed) if drive_allowed else 0.0
+
+            target = (
+                joystick_to_motor_voltage(y, mode, speed)
+                if drive_allowed
+                else 0.0
+            )
+
             update_motor_voltage(target, mode, speed)
             # Final brake interlock after the motor update.
             if read_reed_switch() == 0 or handbrake_active_since is not None:
                 reset_motor_ramp()
-                throttle_armed = False
-                neutral_since_ms = None
 
             if mode != previous_mode:
                 log('Mode: {}'.format(mode))
@@ -934,10 +1029,19 @@ def run(stop_requested=None, log=print):
                 last_display_ms = now
 
             if ticks_diff(now, last_log_ms) >= DIAGNOSTIC_INTERVAL_MS:
-                log('Mode:{} Speed:{} | v={:.2f}km/h | pitch={} | brake:{} | armed:{}'.format(
-                    mode, speed, SPEED_KMH,
-                    '{:+.1f}'.format(get_pitch_degrees()) if imu_is_healthy() else 'N/A',
-                    'ON' if brakes_on else 'OFF', throttle_armed))
+                log(
+                    'Mode:{} Speed:{} | v={:.2f}km/h | pitch={} | '
+                    'brake:{} | direction:{} | state:{}'.format(
+                        mode,
+                        speed,
+                        SPEED_KMH,
+                        '{:+.1f}'.format(get_pitch_degrees())
+                        if imu_is_healthy() else 'N/A',
+                        'ON' if brakes_on else 'OFF',
+                        selected_direction,
+                        direction_state
+                    )
+                )
                 last_log_ms = now
 
             remaining = LOOP_PERIOD_MS - ticks_diff(ticks_ms(), loop_start)
