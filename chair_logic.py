@@ -13,6 +13,7 @@ from machine import Pin, I2C
 from time import sleep_ms, ticks_ms, ticks_diff
 import framebuf
 import ssd1306
+import network
 
 # ============================================================
 # 1. HARDWARE MAP AND CALIBRATED INPUT VALUES
@@ -604,6 +605,7 @@ class DisplayState:
         self.brake_on = False
         self.mode_changed = False
         self.speed_changed = False
+        self.online = False
 
 # ============================================================
 # 8. OLED FONT AND DRAWING -- display-only functions
@@ -659,6 +661,8 @@ def centered(oled, value, y, scale=1):
         x = (WIDTH - width) // 2
     draw_text(oled, value, x, y, scale)
 
+def draw_degree(oled, x, y):
+    oled.rect(x, y, 3, 3, 1)
 
 def mode_short(mode):
     return {'TERRAIN': 'TERRAIN', 'DIFFERENTIAL': 'DIFF',
@@ -668,10 +672,16 @@ def mode_short(mode):
 def draw_idle(oled, state):
     # Three equally weighted, centered rows inside the safe OLED area.
     # Each uses the same 8-pixel font; no value dominates the others.
-    centered(oled, ('SLOPE {:+.1f}deg'.format(state.pitch_deg)
-                    if state.imu_ok else 'SLOPE N/A'), 12, 1)
-    centered(oled, 'MODE  {}'.format(mode_short(state.mode)), 28, 1)
-    centered(oled, 'SPEED {}'.format(state.speed_setting), 44, 1)
+    if state.imu_ok:
+        text = 'slope: {:+.1f}'.format(state.pitch_deg)
+        x = (WIDTH - (len(text) * 8 + 4)) // 2
+        draw_text(oled, text, x, 12)
+        draw_degree(oled, x + len(text) * 8, 12)
+    else:
+        centered(oled, 'SLOPE N/A', 12)
+    centered(oled, 'mode:  {}'.format(mode_short(state.mode)), 28, 1)
+    centered(oled, 'speed: {}'.format(state.speed_setting), 44, 1)
+    centered(oled, 'ONLINE' if state.online else 'OFFLINE', 44)
 
 
 def draw_driving(oled, state):
@@ -704,7 +714,7 @@ def draw_screen(oled, state):
     elif state.mode_changed:
         draw_change(oled, 'MODE', mode_short(state.mode))
     elif state.speed_changed:
-        draw_change(oled, 'SETTING', state.speed_setting)
+        draw_change(oled, 'SPEED', state.speed_setting)
     elif state.throttle_requested or state.speed_kmh >= 0.5:
         draw_driving(oled, state)
     else:
@@ -732,6 +742,7 @@ def update_display_state(state, now, mode=None, speed=None, y=None):
     global _display_last_mode, _display_last_speed
     global _display_mode_changed_at, _display_speed_changed_at
     global _display_smoothed_kmh
+    state.online = network.WLAN(network.STA_IF).isconnected()
     state.pitch_deg = get_pitch_degrees()
     state.imu_ok = imu_is_healthy() and _imu_basis is not None
     state.brake_on = (read_reed_switch() == 0) or (handbrake_active_since is not None)
