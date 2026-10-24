@@ -316,9 +316,28 @@ TERRAIN_FRONT_MAX_VOLTAGE = 1.80
 TERRAIN_REAR_MULTIPLIER = {'LOW': 1.00, 'MEDIUM': 1.2, 'HIGH': 1.5}
 THROTTLE_EXPONENT = 2.0
 MIN_VOLTAGE_REGION = 0.05
-MOTOR_MAX_SLEW_STEP_V = 0.003
-MOTOR_START_SLEW_STEP_V = 0.00010
-MOTOR_SLEW_ACCELERATION_V = 0.000010
+
+MOTOR_RAMP_SETTINGS = {
+    'LOW': {
+        'max_step': 0.003,
+        'start_step': 0.00010,
+        'acceleration': 0.000010,
+    },
+    'MEDIUM': {
+        'max_step': 0.002,
+        'start_step': 0.00008,
+        'acceleration': 0.000006,
+    },
+    'HIGH': {
+        'max_step': 0.0015,
+        'start_step': 0.00006,
+        'acceleration': 0.000004,
+    },
+}
+
+# Default initialization value.
+MOTOR_START_SLEW_STEP_V = MOTOR_RAMP_SETTINGS['LOW']['start_step']
+
 MOTOR_PWM_FREQUENCY = 20000
 motor_current_v = 0.0
 rear_current_v = 0.0
@@ -341,9 +360,15 @@ def disable_motors():
 
 def reset_motor_ramp():
     global motor_current_v, rear_current_v, motor_accel_step_v
+
     motor_current_v = 0.0
     rear_current_v = 0.0
-    motor_accel_step_v = MOTOR_START_SLEW_STEP_V
+
+    # Reset to the initial ramp step.
+    # update_motor_voltage() selects the correct speed-specific
+    # value when the next throttle request begins.
+    motor_accel_step_v = MOTOR_RAMP_SETTINGS['LOW']['start_step']
+
     disable_motors()
 
 def voltage_to_duty(voltage):
@@ -391,31 +416,77 @@ def get_rear_voltage(front_voltage, mode, speed):
 
 def update_motor_voltage(target_v, mode, speed):
     global motor_current_v, rear_current_v, motor_accel_step_v
+
+    # Select acceleration parameters according to speed setting.
+    ramp = MOTOR_RAMP_SETTINGS[speed]
+
+    max_step = ramp['max_step']
+    start_step = ramp['start_step']
+    acceleration = ramp['acceleration']
+
+    # Immediate throttle cutoff when requested.
     if target_v <= 0.0:
         motor_current_v = 0.0
         rear_current_v = 0.0
-        motor_accel_step_v = MOTOR_START_SLEW_STEP_V
+        motor_accel_step_v = start_step
         set_motor_voltages(0.0, 0.0)
         return (0.0, 0.0)
+
+    # Front motors.
     if motor_current_v <= 0.0:
         motor_current_v = MIN_MOTOR_VOLTAGE
-        motor_accel_step_v = MOTOR_START_SLEW_STEP_V
+        motor_accel_step_v = start_step
+
     elif motor_current_v < target_v:
-        motor_current_v += min(motor_accel_step_v, target_v-motor_current_v)
-        motor_accel_step_v = min(motor_accel_step_v+MOTOR_SLEW_ACCELERATION_V,
-                                 MOTOR_MAX_SLEW_STEP_V)
+        motor_current_v += min(
+            motor_accel_step_v,
+            target_v - motor_current_v
+        )
+
+        motor_accel_step_v = min(
+            motor_accel_step_v + acceleration,
+            max_step
+        )
+
     elif motor_current_v > target_v:
-        motor_current_v -= min(MOTOR_MAX_SLEW_STEP_V, motor_current_v-target_v)
-    motor_current_v = clamp(motor_current_v, 0, PICO_PWM_VOLTAGE)
-    rear_target_v = get_rear_voltage(motor_current_v, mode, speed)
+        motor_current_v -= min(
+            max_step,
+            motor_current_v - target_v
+        )
+
+    motor_current_v = clamp(
+        motor_current_v, 0, PICO_PWM_VOLTAGE
+    )
+
+    # Rear motors.
+    rear_target_v = get_rear_voltage(
+        motor_current_v, mode, speed
+    )
+
     if rear_current_v <= 0.0:
         rear_current_v = MIN_MOTOR_VOLTAGE
+
     elif rear_current_v < rear_target_v:
-        rear_current_v += min(MOTOR_MAX_SLEW_STEP_V, rear_target_v-rear_current_v)
+        rear_current_v += min(
+            max_step,
+            rear_target_v - rear_current_v
+        )
+
     else:
-        rear_current_v -= min(MOTOR_MAX_SLEW_STEP_V, rear_current_v-rear_target_v)
-    rear_current_v = clamp(rear_current_v, 0, PICO_PWM_VOLTAGE)
-    set_motor_voltages(motor_current_v, rear_current_v)
+        rear_current_v -= min(
+            max_step,
+            rear_current_v - rear_target_v
+        )
+
+    rear_current_v = clamp(
+        rear_current_v, 0, PICO_PWM_VOLTAGE
+    )
+
+    set_motor_voltages(
+        motor_current_v,
+        rear_current_v
+    )
+
     return (motor_current_v, rear_current_v)
 
 # ============================================================
