@@ -31,7 +31,7 @@ PIN_WIFI_BUTTON = 26            # Owned by supervisor
 PIN_JOYSTICK_X, PIN_JOYSTICK_Y = 27, 28
 
 X_LEFT, X_CENTER, X_RIGHT, X_DEADZONE = 0, 33815, 65351, 2500
-Y_BACKWARD, Y_CENTER, Y_FORWARD, Y_DEADZONE = 5401, 43529, 65340, 1000
+Y_BACKWARD, Y_CENTER, Y_FORWARD, Y_DEADZONE = 5401, 43529, 65340, 1500
 IMU_I2C_ADDRESS = 0x68
 OLED_I2C_ADDRESS = 0x3C
 
@@ -611,7 +611,7 @@ class DisplayState:
 WIDTH, HEIGHT = 128, 64
 SAFE_LEFT, SAFE_RIGHT = 8, 119
 SAFE_TOP, SAFE_BOTTOM = 7, 56
-DISPLAY_INTERVAL_MS = 100
+DISPLAY_INTERVAL_MS = 200
 
 # Use built-in 8x8 framebuf font; scale pixels in software, no extra fonts.
 _glyph = bytearray(8)
@@ -620,14 +620,27 @@ _glyph_fb = framebuf.FrameBuffer(_glyph, 8, 8, framebuf.MONO_HLSB)
 
 def draw_text(oled, value, x, y, scale=1):
     value = str(value)
+
+    if scale == 1:
+        oled.text(value, x, y, 1)
+        return
+
     for index, ch in enumerate(value):
         _glyph_fb.fill(0)
         _glyph_fb.text(ch, 0, 0, 1)
+
+        char_x = x + index * 8 * scale
+
         for py in range(8):
             for px in range(8):
                 if _glyph_fb.pixel(px, py):
-                    oled.fill_rect(x + index*8*scale + px*scale,
-                                   y + py*scale, scale, scale, 1)
+                    oled.fill_rect(
+                        char_x + px * scale,
+                        y + py * scale,
+                        scale,
+                        scale,
+                        1
+                    )
 
 
 def centered(oled, value, y, scale=1):
@@ -719,7 +732,7 @@ def update_display_state(state, now, mode=None, speed=None, y=None):
     global _display_last_mode, _display_last_speed
     global _display_mode_changed_at, _display_speed_changed_at
     global _display_smoothed_kmh
-    state.pitch_deg = imu_update(now)
+    state.pitch_deg = get_pitch_degrees()
     state.imu_ok = imu_is_healthy() and _imu_basis is not None
     state.brake_on = (read_reed_switch() == 0) or (handbrake_active_since is not None)
     if y is None:
@@ -797,7 +810,7 @@ def run(stop_requested=None, log=print):
     _display_smoothed_kmh = 0.0
 
     try:
-        _i2c = I2C(0, sda=Pin(PIN_I2C_SDA), scl=Pin(PIN_I2C_SCL), freq=50000)
+        _i2c = I2C(0, sda=Pin(PIN_I2C_SDA), scl=Pin(PIN_I2C_SCL), freq=400000)
         _oled = ssd1306.SSD1306_I2C(WIDTH, HEIGHT, _i2c,
                                     addr=OLED_I2C_ADDRESS)
         if stop_requested is not None and stop_requested():
@@ -832,7 +845,9 @@ def run(stop_requested=None, log=print):
             # Run the brake actuator first, so its active state inhibits traction.
             handbrake_actuating = update_handbrake(loop_start, log)
             brakes_on = (read_reed_switch() == 0 or handbrake_actuating)
+
             update_wheel_speed(loop_start)
+            imu_update(loop_start)
 
             elapsed = max(1, ticks_diff(loop_start, last_servo_ms))
             last_servo_ms = loop_start
