@@ -229,7 +229,7 @@ from machine import ADC, PWM, disable_irq, enable_irq
 from time import ticks_us
 
 PICO_PWM_VOLTAGE = 3.3
-LOOP_PERIOD_MS = 20
+LOOP_PERIOD_MS = 5
 
 def clamp(value, low, high):
     return max(low, min(high, value))
@@ -881,13 +881,10 @@ def run(stop_requested=None, log=print):
 
             if direction_change_pending:
                 reset_motor_ramp()
-
-                # Switch direction once the wheels are stationary.
-                if all(abs(rpm) < 0.5 for rpm in hall_rpm):
-                    select_motor_direction(requested_direction)
-                    selected_direction = requested_direction
-                    direction_change_pending = False
-                    log('Motor direction: {}'.format(selected_direction))
+                select_motor_direction(requested_direction)
+                selected_direction = requested_direction
+                direction_change_pending = False
+                log('Motor direction: {}'.format(selected_direction))
 
             drive_allowed = (
                 throttle_armed
