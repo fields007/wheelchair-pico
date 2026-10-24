@@ -771,7 +771,6 @@ def update_display_state(state, now, mode=None, speed=None, y=None):
 _i2c = None
 _oled = None
 THROTTLE_ARM_NEUTRAL_MS = 500
-DIRECTION_NEUTRAL_MS = 800
 DIAGNOSTIC_INTERVAL_MS = 1000
 
 
@@ -791,12 +790,13 @@ def run(stop_requested=None, log=print):
     global _display_mode_changed_at, _display_speed_changed_at
     global _display_smoothed_kmh
 
-    stop_outputs()
     throttle_armed = False
     neutral_since_ms = None
-    neutral_direction_since = None
-    direction_ready = False
+
+    requested_direction = 'FORWARD'
     selected_direction = 'FORWARD'
+    direction_change_pending = False
+
     last_servo_ms = ticks_ms()
     last_display_ms = ticks_ms() - DISPLAY_INTERVAL_MS
     last_log_ms = ticks_ms()
@@ -869,25 +869,30 @@ def run(stop_requested=None, log=print):
                 else:
                     neutral_since_ms = None
 
-            if joystick_neutral:
-                if neutral_direction_since is None:
-                    neutral_direction_since = loop_start
-                if ticks_diff(loop_start, neutral_direction_since) >= DIRECTION_NEUTRAL_MS:
-                    direction_ready = True
-            else:
-                neutral_direction_since = None
+            # Accept direction requests immediately, without a neutral dwell.
+            if direction != 'NEUTRAL':
+                if direction != requested_direction:
+                    requested_direction = direction
 
-            # Direction changes only after sustained neutral, with zero PWM.
-            if (direction != 'NEUTRAL' and direction != selected_direction
-                    and direction_ready and not brakes_on):
+                    # Remove the previous motor command immediately.
+                    reset_motor_ramp()
+
+                    # Prevent throttle until the direction transition is safe.
+                    direction_change_pending = (
+                        requested_direction != selected_direction
+                    )
+
+            # A pending direction change must not produce motor torque.
+            if direction_change_pending:
                 reset_motor_ramp()
-                select_motor_direction(direction)
-                selected_direction = direction
-                direction_ready = False
 
-            drive_allowed = (throttle_armed and not brakes_on and
-                             direction != 'NEUTRAL' and
-                             direction == selected_direction)
+            drive_allowed = (
+                throttle_armed
+                and not brakes_on
+                and not direction_change_pending
+                and direction != 'NEUTRAL'
+                and direction == selected_direction
+            )
             target = joystick_to_motor_voltage(y, mode, speed) if drive_allowed else 0.0
             update_motor_voltage(target, mode, speed)
             # Final brake interlock after the motor update.
