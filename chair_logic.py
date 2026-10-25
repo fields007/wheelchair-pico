@@ -498,47 +498,97 @@ def update_motor_voltage(target_v, mode, speed):
     return (motor_current_v, rear_current_v)
 
 # ============================================================
-# 4. STEERING LOGIC -- joystick and steering servo
+# 4. STEERING LOGIC -- constant-speed steering
 # ============================================================
+
 servo = PWM(Pin(PIN_STEERING_SERVO))
 servo.freq(50)
-SERVO_LEFT, SERVO_CENTER, SERVO_RIGHT = 1100, 1500, 1900
+
+SERVO_LEFT = 1100
+SERVO_CENTER = 1500
+SERVO_RIGHT = 1900
+
 SERVO_RELEASE_DELAY_MS = 500
-STEERING_STEP_US = {
-    'TERRAIN': {'LOW': 8, 'MEDIUM': 8, 'HIGH': 8},
-    'DIFFERENTIAL': {'LOW': 8, 'MEDIUM': 8, 'HIGH': 8},
-    'ROAD': {'LOW': 8, 'MEDIUM': 2, 'HIGH': 1},
+
+# Steering speed in microseconds of PWM pulse width per second.
+# The larger the value, the faster the steering.
+STEERING_SPEED_US_PER_SEC = {
+    'TERRAIN': {
+        'LOW': 1600,
+        'MEDIUM': 1600,
+        'HIGH': 1600,
+    },
+    'DIFFERENTIAL': {
+        'LOW': 1600,
+        'MEDIUM': 1600,
+        'HIGH': 1600,
+    },
+    'ROAD': {
+        'LOW': 1600,
+        'MEDIUM': 250,
+        'HIGH': 100,
+    },
 }
-STEERING_TARGET_FILTER = 0.25
+
+# Steering position updated at 50 Hz.
+# The rest of the control loop remains at approximately 200 Hz.
+STEERING_UPDATE_INTERVAL_MS = 20
+
 servo_current_us = float(SERVO_CENTER)
-servo_target_filtered_us = float(SERVO_CENTER)
 servo_last_active_ms = ticks_ms()
+servo_last_update_ms = ticks_ms()
 servo_enabled = False
+
 
 def set_servo_us(pulse_us):
     global servo_enabled
-    pulse_us = clamp(pulse_us, SERVO_LEFT, SERVO_RIGHT)
-    servo.duty_u16(int(pulse_us*65535/20000))
+
+    pulse_us = clamp(
+        pulse_us,
+        SERVO_LEFT,
+        SERVO_RIGHT
+    )
+
+    servo.duty_u16(
+        int(pulse_us * 65535 / 20000)
+    )
+
     servo_enabled = True
+
 
 def disable_servo():
     global servo_enabled
+
     servo.duty_u16(0)
     servo_enabled = False
 
+
 def steering_to_pulse(steering_percent):
     p = clamp(steering_percent, -100.0, 100.0)
+
     if p < 0:
-        return int(SERVO_CENTER + p/100.0*(SERVO_CENTER-SERVO_LEFT))
-    return int(SERVO_CENTER + p/100.0*(SERVO_RIGHT-SERVO_CENTER))
+        return int(
+            SERVO_CENTER
+            + p / 100.0 * (SERVO_CENTER - SERVO_LEFT)
+        )
+
+    return int(
+        SERVO_CENTER
+        + p / 100.0 * (SERVO_RIGHT - SERVO_CENTER)
+    )
+
 
 def calculate_steering(x_percent, direction):
-    return x_percent  # No reverse steering inversion.
+    # No reverse steering inversion.
+    return x_percent
+
 
 def update_servo(target_us, mode, speed, joystick_x,
                  elapsed_ms=LOOP_PERIOD_MS):
 
-    global servo_current_us, servo_last_active_ms
+    global servo_current_us
+    global servo_last_active_ms
+    global servo_last_update_ms
 
     now = ticks_ms()
 
@@ -549,17 +599,25 @@ def update_servo(target_us, mode, speed, joystick_x,
     if joystick_active:
         servo_last_active_ms = now
 
-    # Maximum permitted change in pulse width per iteration.
-    max_step = (
-        STEERING_STEP_US[mode][speed]
-        * clamp(elapsed_ms, 1, 60)
-        / LOOP_PERIOD_MS
-    )
+    # Time elapsed since the previous steering update.
+    dt_ms = ticks_diff(now, servo_last_update_ms)
 
-    # Difference between desired and current steering position.
+    # Keep the main loop fast, but update steering at 50 Hz.
+    if dt_ms < STEERING_UPDATE_INTERVAL_MS:
+        return int(round(servo_current_us))
+
+    servo_last_update_ms = now
+
+    # Steering speed in microseconds per second.
+    steering_speed = STEERING_SPEED_US_PER_SEC[mode][speed]
+
+    # Maximum permitted movement during elapsed time.
+    max_step = steering_speed * dt_ms / 1000.0
+
+    # Difference between target and current steering position.
     difference = target_us - servo_current_us
 
-    # Apply speed limitation.
+    # Constant-speed movement toward target.
     servo_current_us += clamp(
         difference,
         -max_step,
@@ -927,8 +985,8 @@ def stop_outputs():
 
 
 def run(stop_requested=None, log=print):
-    global _i2c, _oled, servo_current_us, servo_target_filtered_us
-    global servo_last_active_ms
+    global _i2c, _oled, servo_current_us
+    global servo_last_active_ms, servo_last_update_ms
     global _display_last_mode, _display_last_speed
     global _display_mode_changed_at, _display_speed_changed_at
     global _display_smoothed_kmh
@@ -944,7 +1002,6 @@ def run(stop_requested=None, log=print):
 
     # Traction remains disabled until direction selection is complete.
 
-    last_servo_ms = ticks_ms()
     last_display_ms = ticks_ms() - DISPLAY_INTERVAL_MS
     last_log_ms = ticks_ms()
     previous_mode = None
@@ -969,9 +1026,11 @@ def run(stop_requested=None, log=print):
 
         # Initialize handbrake state and center steering while traction is OFF.
         reset_handbrake()
+
         servo_current_us = float(SERVO_CENTER)
-        servo_target_filtered_us = float(SERVO_CENTER)
         servo_last_active_ms = ticks_ms()
+        servo_last_update_ms = ticks_ms()
+
         set_servo_us(SERVO_CENTER)
         log('Wheelchair control loop started; direction interlock active')
 
@@ -996,11 +1055,14 @@ def run(stop_requested=None, log=print):
             update_wheel_speed(loop_start)
             imu_update(loop_start)
 
-            elapsed = max(1, ticks_diff(loop_start, last_servo_ms))
-            last_servo_ms = loop_start
             steering_percent = calculate_steering(x_percent, direction)
-            update_servo(steering_to_pulse(steering_percent), mode, speed,
-                         x, elapsed)
+
+            update_servo(
+                steering_to_pulse(steering_percent),
+                mode,
+                speed,
+                x
+            )
 
             if brakes_on:
                 reset_motor_ramp()
