@@ -14,6 +14,8 @@ from time import sleep_ms, ticks_ms, ticks_diff
 import framebuf
 import ssd1306
 import network
+from machine import ADC, PWM, disable_irq, enable_irq
+from time import ticks_us
 
 # ============================================================
 # 1. HARDWARE MAP AND CALIBRATED INPUT VALUES
@@ -226,8 +228,6 @@ def imu_is_healthy():
 # ============================================================
 # 3. THROTTLE LOGIC -- joystick, ramps, motor PWM
 # ============================================================
-from machine import ADC, PWM, disable_irq, enable_irq
-from time import ticks_us
 
 PICO_PWM_VOLTAGE = 3.3
 LOOP_PERIOD_MS = 5
@@ -335,6 +335,12 @@ MOTOR_RAMP_SETTINGS = {
     },
 }
 
+MOTOR_RAMP_MODE_MULTIPLIER = {
+    'TERRAIN': 2.0,
+    'DIFFERENTIAL': 2.0,
+    'ROAD': 1.0,
+}
+
 # Default initialization value.
 MOTOR_START_SLEW_STEP_V = MOTOR_RAMP_SETTINGS['LOW']['start_step']
 
@@ -420,9 +426,11 @@ def update_motor_voltage(target_v, mode, speed):
     # Select acceleration parameters according to speed setting.
     ramp = MOTOR_RAMP_SETTINGS[speed]
 
-    max_step = ramp['max_step']
-    start_step = ramp['start_step']
-    acceleration = ramp['acceleration']
+    multiplier = MOTOR_RAMP_MODE_MULTIPLIER[mode]
+
+    max_step = ramp['max_step'] * multiplier
+    start_step = ramp['start_step'] * multiplier
+    acceleration = ramp['acceleration'] * multiplier
 
     # Immediate throttle cutoff when requested.
     if target_v <= 0.0:
@@ -527,25 +535,55 @@ def steering_to_pulse(steering_percent):
 def calculate_steering(x_percent, direction):
     return x_percent  # No reverse steering inversion.
 
-def update_servo(target_us, mode, speed, joystick_x, elapsed_ms=LOOP_PERIOD_MS):
-    global servo_current_us, servo_target_filtered_us, servo_last_active_ms
+def update_servo(target_us, mode, speed, joystick_x,
+                 elapsed_ms=LOOP_PERIOD_MS):
+
+    global servo_current_us, servo_last_active_ms
+
     now = ticks_ms()
-    joystick_active = abs(joystick_x-X_CENTER) > X_DEADZONE
+
+    joystick_active = (
+        abs(joystick_x - X_CENTER) > X_DEADZONE
+    )
+
     if joystick_active:
         servo_last_active_ms = now
-        servo_target_filtered_us += STEERING_TARGET_FILTER * (target_us-servo_target_filtered_us)
-    else:
-        servo_target_filtered_us = float(SERVO_CENTER)
-    max_step = STEERING_STEP_US[mode][speed] * (clamp(elapsed_ms, 1, 60)/LOOP_PERIOD_MS)
-    difference = servo_target_filtered_us-servo_current_us
-    servo_current_us += clamp(difference, -max_step, max_step)
-    if abs(servo_current_us-SERVO_CENTER) < 0.5 and not joystick_active:
+
+    # Maximum permitted change in pulse width per iteration.
+    max_step = (
+        STEERING_STEP_US[mode][speed]
+        * clamp(elapsed_ms, 1, 60)
+        / LOOP_PERIOD_MS
+    )
+
+    # Difference between desired and current steering position.
+    difference = target_us - servo_current_us
+
+    # Apply speed limitation.
+    servo_current_us += clamp(
+        difference,
+        -max_step,
+        max_step
+    )
+
+    # Snap to center when sufficiently close.
+    if (
+        abs(servo_current_us - SERVO_CENTER) < 0.5
+        and not joystick_active
+    ):
         servo_current_us = float(SERVO_CENTER)
-    if (not joystick_active and servo_current_us == SERVO_CENTER and
-            ticks_diff(now, servo_last_active_ms) >= SERVO_RELEASE_DELAY_MS):
+
+    # Release servo after returning to center.
+    if (
+        not joystick_active
+        and servo_current_us == SERVO_CENTER
+        and ticks_diff(now, servo_last_active_ms)
+            >= SERVO_RELEASE_DELAY_MS
+    ):
         disable_servo()
     else:
         set_servo_us(servo_current_us)
+
     return int(round(servo_current_us))
 
 # ============================================================
