@@ -336,8 +336,8 @@ MOTOR_RAMP_SETTINGS = {
 }
 
 MOTOR_RAMP_MODE_MULTIPLIER = {
-    'TERRAIN': 3.0,
-    'DIFFERENTIAL': 3.0,
+    'TERRAIN': 4.0,
+    'DIFFERENTIAL': 4.0,
     'ROAD': 1.0,
 }
 
@@ -525,10 +525,45 @@ STEERING_SPEED_US_PER_SEC = {
     },
     'ROAD': {
         'LOW': 1600,
-        'MEDIUM': 250,
-        'HIGH': 100,
+        'MEDIUM': 1600,
+        'HIGH': 1600,
     },
 }
+
+# Speed-dependent steering parameters.
+STEERING_SLOWDOWN_START_KMH = 7.0
+STEERING_SLOWDOWN_END_KMH = 17.0
+
+STEERING_MAX_SPEED = 1600.0
+STEERING_MIN_SPEED = 100.0
+
+
+def get_steering_speed(mode, speed, wheelchair_kmh):
+
+    # TERRAIN, DIFFERENTIAL and ROAD LOW remain unchanged.
+    if mode != 'ROAD' or speed == 'LOW':
+        return STEERING_SPEED_US_PER_SEC[mode][speed]
+
+    # ROAD MEDIUM and HIGH:
+    # Full steering speed below 7 km/h.
+    if wheelchair_kmh <= STEERING_SLOWDOWN_START_KMH:
+        return STEERING_MAX_SPEED
+
+    # Minimum steering speed above 17 km/h.
+    if wheelchair_kmh >= STEERING_SLOWDOWN_END_KMH:
+        return STEERING_MIN_SPEED
+
+    # Linear interpolation between 7 and 17 km/h.
+    fraction = (
+        (wheelchair_kmh - STEERING_SLOWDOWN_START_KMH)
+        /
+        (STEERING_SLOWDOWN_END_KMH - STEERING_SLOWDOWN_START_KMH)
+    )
+
+    return (
+        STEERING_MAX_SPEED
+        + fraction * (STEERING_MIN_SPEED - STEERING_MAX_SPEED)
+    )
 
 # Steering position updated at 50 Hz.
 # The rest of the control loop remains at approximately 200 Hz.
@@ -608,8 +643,12 @@ def update_servo(target_us, mode, speed, joystick_x,
 
     servo_last_update_ms = now
 
-    # Steering speed in microseconds per second.
-    steering_speed = STEERING_SPEED_US_PER_SEC[mode][speed]
+    # Steering speed depends on measured wheelchair speed.
+    steering_speed = get_steering_speed(
+        mode,
+        speed,
+        SPEED_KMH
+    )
 
     # Maximum permitted movement during elapsed time.
     max_step = steering_speed * dt_ms / 1000.0
