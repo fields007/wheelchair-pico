@@ -336,8 +336,8 @@ MOTOR_RAMP_SETTINGS = {
 }
 
 MOTOR_RAMP_MODE_MULTIPLIER = {
-    'TERRAIN': 2.0,
-    'DIFFERENTIAL': 2.0,
+    'TERRAIN': 3.0,
+    'DIFFERENTIAL': 3.0,
     'ROAD': 1.0,
 }
 
@@ -507,7 +507,7 @@ SERVO_RELEASE_DELAY_MS = 500
 STEERING_STEP_US = {
     'TERRAIN': {'LOW': 8, 'MEDIUM': 8, 'HIGH': 8},
     'DIFFERENTIAL': {'LOW': 8, 'MEDIUM': 8, 'HIGH': 8},
-    'ROAD': {'LOW': 8, 'MEDIUM': 4, 'HIGH': 4},
+    'ROAD': {'LOW': 8, 'MEDIUM': 2, 'HIGH': 1},
 }
 STEERING_TARGET_FILTER = 0.25
 servo_current_us = float(SERVO_CENTER)
