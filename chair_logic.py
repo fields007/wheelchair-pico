@@ -337,7 +337,7 @@ MOTOR_RAMP_SETTINGS = {
 
 MOTOR_RAMP_MODE_MULTIPLIER = {
     'TERRAIN': 4.0,
-    'DIFFERENTIAL': 4.0,
+    'DIFFERENTIAL': 1.0,
     'ROAD': 1.0,
 }
 
@@ -398,7 +398,7 @@ def set_motor_voltages(front_voltage, rear_voltage):
         pwm.duty_u16(rear_duty)
 
 def get_front_max_voltage(mode, speed):
-    if mode in ('TERRAIN', 'DIFFERENTIAL'):
+    if mode == 'TERRAIN':
         return TERRAIN_FRONT_MAX_VOLTAGE
     return ROAD_MAX_VOLTAGE[speed]
 
@@ -416,7 +416,7 @@ def joystick_to_motor_voltage(y, mode, speed):
 def get_rear_voltage(front_voltage, mode, speed):
     if front_voltage <= 0:
         return 0.0
-    if mode not in ('TERRAIN', 'DIFFERENTIAL'):
+    if mode != 'TERRAIN':
         return front_voltage
     return min(PICO_PWM_VOLTAGE, front_voltage*TERRAIN_REAR_MULTIPLIER[speed])
 
@@ -535,7 +535,7 @@ STEERING_SLOWDOWN_START_KMH = 7.0
 STEERING_SLOWDOWN_END_KMH = 17.0
 
 STEERING_MAX_SPEED = 1600.0
-STEERING_MIN_SPEED = 100.0
+STEERING_MIN_SPEED = 200.0
 
 
 def get_steering_speed(mode, speed, wheelchair_kmh):
