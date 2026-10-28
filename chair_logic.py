@@ -311,6 +311,7 @@ def select_motor_direction(direction):
         raise ValueError('Invalid motor direction')
 
 MIN_MOTOR_VOLTAGE = 1.60
+REVERSE_VOLTAGE_MULTIPLIER = 1.20
 ROAD_MAX_VOLTAGE = {'LOW': 1.90, 'MEDIUM': 2.20, 'HIGH': 3.30}
 TERRAIN_FRONT_MAX_VOLTAGE = 1.80
 TERRAIN_REAR_MULTIPLIER = {'LOW': 1.00, 'MEDIUM': 1.2, 'HIGH': 1.5}
@@ -1206,6 +1207,13 @@ def run(stop_requested=None, log=print):
                 if drive_allowed
                 else 0.0
             )
+
+            if drive_allowed and direction == 'REVERSE':
+                target = min(
+                    PICO_PWM_VOLTAGE,
+                    MIN_MOTOR_VOLTAGE
+                    + (target - MIN_MOTOR_VOLTAGE) * REVERSE_VOLTAGE_MULTIPLIER
+                )
 
             update_motor_voltage(target, mode, speed)
             # Final brake interlock after the motor update.
