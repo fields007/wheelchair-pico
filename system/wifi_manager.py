@@ -26,7 +26,6 @@ import network
 # ============================================================
 # SETTINGS
 # ============================================================
-
 WIFI_FILE = "wifi.json"
 
 # Maximum time spent trying each configured network.
@@ -36,14 +35,12 @@ WIFI_TIMEOUT_MS = 10000
 # ============================================================
 # STATE
 # ============================================================
-
 wlan = None
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
-
 def load_networks():
     """
     Load the list of configured Wi-Fi networks.
@@ -51,19 +48,13 @@ def load_networks():
     Returns an empty list if the file cannot be read or its
     contents are invalid.
     """
-
     try:
-
         with open(WIFI_FILE, "r") as file:
             config = json.load(file)
-
     except Exception:  # noqa: BLE001
         return []
 
-    networks = config.get(
-        "networks",
-        []
-    )
+    networks = config.get("networks", [])
 
     if not isinstance(networks, list):
         return []
@@ -78,25 +69,16 @@ def save_networks(networks):
     Returns True on success.
     Returns False on failure.
     """
-
     if not isinstance(networks, list):
         return False
 
     try:
-
-        config = {
-            "networks": networks
-        }
+        config = {"networks": networks}
 
         with open(WIFI_FILE, "w") as file:
-
-            json.dump(
-                config,
-                file
-            )
+            json.dump(config, file)
 
         return True
-
     except Exception:  # noqa: BLE001
         return False
 
@@ -113,45 +95,31 @@ def add_network(ssid, password):
     This function only stores the credentials.
     It does NOT change the current Wi-Fi connection.
     """
-
     if not ssid:
         return False
 
     networks = load_networks()
-
     found = False
 
     for entry in networks:
-
         if not isinstance(entry, dict):
             continue
 
         if entry.get("ssid") == ssid:
-
             entry["password"] = password
-
             found = True
 
             break
 
     if not found:
+        networks.append({"ssid": ssid, "password": password})
 
-        networks.append(
-            {
-                "ssid": ssid,
-                "password": password
-            }
-        )
-
-    return save_networks(
-        networks
-    )
+    return save_networks(networks)
 
 
 # ============================================================
 # CONNECTION
 # ============================================================
-
 def connect(log=print):
     """
     Try each configured Wi-Fi network.
@@ -159,7 +127,6 @@ def connect(log=print):
     Returns True if connected.
     Returns False if no configured network can be reached.
     """
-
     global wlan
 
     log("Loading Wi-Fi configuration.")
@@ -167,21 +134,14 @@ def connect(log=print):
     networks = load_networks()
 
     if not networks:
-
-        log(
-            "No usable Wi-Fi networks configured."
-        )
+        log("No usable Wi-Fi networks configured.")
 
         return False
 
-    log(
-        f"Found {len(networks)} configured Wi-Fi network(s)."
-    )
+    log(f"Found {len(networks)} configured Wi-Fi network(s).")
 
     # Use the current MicroPython station-interface API.
-    wlan = network.WLAN(
-        network.WLAN.IF_STA
-    )
+    wlan = network.WLAN(network.WLAN.IF_STA)
 
     wlan.active(True)
 
@@ -190,12 +150,8 @@ def connect(log=print):
 
     # Something may already have connected Wi-Fi.
     if wlan.isconnected():
-
         log("Wi-Fi already connected.")
-
-        log(
-            f"IP address: {wlan.ifconfig()[0]}"
-        )
+        log(f"IP address: {wlan.ifconfig()[0]}")
 
         return True
 
@@ -205,93 +161,56 @@ def connect(log=print):
     # subsystem an opportunity to finish initialising before
     # wlan.connect() is called.
     try:
-
         log("Scanning for Wi-Fi networks.")
 
         wlan.scan()
-
     except Exception as error:  # noqa: BLE001
-
-        log(
-            f"Initial Wi-Fi scan failed: {error}"
-        )
+        log(f"Initial Wi-Fi scan failed: {error}")
 
     for entry in networks:
-
         if not isinstance(entry, dict):
             continue
 
         ssid = entry.get("ssid")
-
-        password = entry.get(
-            "password",
-            ""
-        )
+        password = entry.get("password", "")
 
         if not ssid:
             continue
 
-        log(
-            f"Trying Wi-Fi: {ssid}"
-        )
+        log(f"Trying Wi-Fi: {ssid}")
 
         # Disconnect from any previous failed attempt.
         try:
-
             wlan.disconnect()
-
         except Exception:  # noqa: BLE001, S110
             pass
 
         sleep_ms(200)
 
         try:
-
-            wlan.connect(
-                ssid,
-                password
-            )
-
+            wlan.connect(ssid, password)
         except Exception as error:  # noqa: BLE001
-
-            log(
-                f"Could not start Wi-Fi connection to {ssid}: {error}"
-            )
+            log(f"Could not start Wi-Fi connection to {ssid}: {error}")
 
             continue
 
         start = ticks_ms()
 
         while not wlan.isconnected():
-
-            if ticks_diff(
-                ticks_ms(),
-                start
-            ) >= WIFI_TIMEOUT_MS:
-
-                log(
-                    f"Wi-Fi timed out: {ssid}"
-                )
+            if ticks_diff(ticks_ms(), start) >= WIFI_TIMEOUT_MS:
+                log(f"Wi-Fi timed out: {ssid}")
 
                 break
 
             sleep_ms(100)
 
         if wlan.isconnected():
-
-            log(
-                f"Connected to Wi-Fi: {ssid}"
-            )
-
-            log(
-                f"IP address: {wlan.ifconfig()[0]}"
-            )
+            log(f"Connected to Wi-Fi: {ssid}")
+            log(f"IP address: {wlan.ifconfig()[0]}")
 
             return True
 
-    log(
-        "Could not connect to any configured Wi-Fi network."
-    )
+    log("Could not connect to any configured Wi-Fi network.")
 
     return False
 
@@ -299,21 +218,16 @@ def connect(log=print):
 # ============================================================
 # STATUS
 # ============================================================
-
 def is_connected():
     """
     Return True if Wi-Fi is currently connected.
     """
-
     if wlan is None:
         return False
 
     try:
-
         return wlan.isconnected()
-
     except Exception:  # noqa: BLE001
-
         return False
 
 
@@ -323,16 +237,12 @@ def ip_address():
 
     Returns None when Wi-Fi is not connected.
     """
-
     if not is_connected():
         return None
 
     try:
-
         return wlan.ifconfig()[0] # type: ignore
-
     except Exception:  # noqa: BLE001
-
         return None
 
 
@@ -342,23 +252,18 @@ def current_ssid():
 
     Returns None if unavailable.
     """
-
     if not is_connected():
         return None
 
     try:
-
         return wlan.config("ssid") # type: ignore
-
     except Exception:  # noqa: BLE001
-
         return None
 
 
 # ============================================================
 # SELF-TEST
 # ============================================================
-
 def self_test():
     """
     Perform a non-destructive test of this module.
@@ -372,7 +277,6 @@ def self_test():
 
     No Wi-Fi credentials are modified.
     """
-
     print()
     print("==============================")
     print("WIFI MANAGER SELF-TEST")
@@ -382,52 +286,38 @@ def self_test():
     # --------------------------------------------------------
     # CONFIGURATION TEST
     # --------------------------------------------------------
-
     print("1. Reading wifi.json...")
 
     networks = load_networks()
 
     if not networks:
-
         print("FAILED: No usable networks found.")
         print()
         return
 
-    print(
-        f"OK: Found {len(networks)} configured network(s)."
-    )
+    print(f"OK: Found {len(networks)} configured network(s).")
 
     for index, entry in enumerate(networks):
-
         if not isinstance(entry, dict):
             continue
 
-        ssid = entry.get(
-            "ssid",
-            "<missing SSID>"
-        )
+        ssid = entry.get("ssid", "<missing SSID>")
 
-        print(
-            f"   {index + 1}: {ssid}"
-        )
+        print(f"   {index + 1}: {ssid}")
 
     print()
 
     # --------------------------------------------------------
     # CONNECTION TEST
     # --------------------------------------------------------
-
     print("2. Testing Wi-Fi connection...")
     print()
 
-    success = connect(
-        log=print
-    )
+    success = connect(log=print)
 
     print()
 
     if not success:
-
         print("FAILED: Could not connect to Wi-Fi.")
         print()
         return
@@ -437,39 +327,21 @@ def self_test():
     # --------------------------------------------------------
     # STATUS FUNCTIONS
     # --------------------------------------------------------
-
     print()
     print("3. Testing status functions...")
-
-    print(
-        f"   is_connected(): {is_connected()}"
-    )
-
-    print(
-        f"   current_ssid(): {current_ssid()}"
-    )
-
-    print(
-        f"   ip_address(): {ip_address()}"
-    )
-
+    print(f"   is_connected(): {is_connected()}")
+    print(f"   current_ssid(): {current_ssid()}")
+    print(f"   ip_address(): {ip_address()}")
     print()
 
     # --------------------------------------------------------
     # RESULT
     # --------------------------------------------------------
-
-    if (
-        is_connected()
-        and ip_address() is not None
-    ):
-
+    if (is_connected() and ip_address() is not None):
         print("==============================")
         print("WIFI SELF-TEST PASSED")
         print("==============================")
-
     else:
-
         print("==============================")
         print("WIFI SELF-TEST FAILED")
         print("==============================")
@@ -480,7 +352,5 @@ def self_test():
 # ============================================================
 # RUN DIRECTLY
 # ============================================================
-
 if __name__ == "__main__":
-
     self_test()

@@ -48,18 +48,14 @@ MQTT_KEEPALIVE = 60
 # ============================================================
 # STATE
 # ============================================================
-
 mqtt_client = None
-
 command_callback = None
-
 mqtt_connected = False
 
 
 # ============================================================
 # INTERNAL MESSAGE CALLBACK
 # ============================================================
-
 def _message_received(topic, message):
     """
     Internal callback used by umqtt.simple.
@@ -67,38 +63,27 @@ def _message_received(topic, message):
     Command messages are decoded and passed to the callback
     registered by set_command_callback().
     """
-
     if topic != MQTT_COMMAND_TOPIC:
         return
 
     try:
-
         command = message.decode()
-
     except Exception:  # noqa: BLE001
-
         return
 
     if command_callback is None:
         return
 
     try:
-
         command_callback(command)
-
     except Exception as error:  # noqa: BLE001
-
         # A bad command handler must not crash MQTT processing.
-        print(
-            "Command callback error:",
-            error
-        )
+        print("Command callback error:", error)
 
 
 # ============================================================
 # COMMAND CALLBACK
 # ============================================================
-
 def set_command_callback(callback):
     """
     Set the function that receives command strings.
@@ -112,7 +97,6 @@ def set_command_callback(callback):
 
     The callback receives one string argument.
     """
-
     global command_callback
 
     command_callback = callback
@@ -121,7 +105,6 @@ def set_command_callback(callback):
 # ============================================================
 # CONNECTION
 # ============================================================
-
 def connect(log=print):
     """
     Connect to the MQTT broker and subscribe to commands.
@@ -131,7 +114,6 @@ def connect(log=print):
     Returns True on success.
     Returns False on failure.
     """
-
     global mqtt_client
     global mqtt_connected
 
@@ -139,19 +121,12 @@ def connect(log=print):
     mqtt_client = None
 
     try:
-
-        client_id = binascii.hexlify(
-            machine.unique_id()
-        )
-
-        context = ssl.SSLContext(
-            ssl.PROTOCOL_TLS_CLIENT
-        )
+        client_id = binascii.hexlify(machine.unique_id())
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
         # This is the TLS configuration already tested
         # successfully with the Pico and HiveMQ.
         context.verify_mode = ssl.CERT_NONE
-
         client = MQTTClient(
             client_id=client_id,
             server=MQTT_HOST,
@@ -162,9 +137,7 @@ def connect(log=print):
             ssl=context
         )
 
-        client.set_callback(
-            _message_received
-        )
+        client.set_callback(_message_received)
 
         log("Connecting to MQTT.")
 
@@ -172,27 +145,19 @@ def connect(log=print):
 
         log("MQTT connected.")
 
-        client.subscribe(
-            MQTT_COMMAND_TOPIC
-        )
+        client.subscribe(MQTT_COMMAND_TOPIC)
 
-        log(
-            f"Subscribed to {MQTT_COMMAND_TOPIC.decode()}"
-        )
+        log(f"Subscribed to {MQTT_COMMAND_TOPIC.decode()}")
 
         mqtt_client = client
         mqtt_connected = True
 
         return True
-
     except Exception as error:  # noqa: BLE001
-
         mqtt_client = None
         mqtt_connected = False
 
-        log(
-            f"MQTT connection failed: {error}"
-        )
+        log(f"MQTT connection failed: {error}")
 
         return False
 
@@ -200,22 +165,18 @@ def connect(log=print):
 # ============================================================
 # DISCONNECT
 # ============================================================
-
 def disconnect():
     """
     Disconnect MQTT if possible.
 
     Safe to call even when MQTT is already disconnected.
     """
-
     global mqtt_client
     global mqtt_connected
 
     if mqtt_client is not None:
-
         try:
             mqtt_client.disconnect()
-
         except Exception:  # noqa: BLE001, S110
             pass
 
@@ -226,7 +187,6 @@ def disconnect():
 # ============================================================
 # STATUS
 # ============================================================
-
 def is_connected():
     """
     Return whether this module currently considers MQTT
@@ -234,17 +194,12 @@ def is_connected():
 
     A later network error will cause this state to become False.
     """
-
-    return (
-        mqtt_connected
-        and mqtt_client is not None
-    )
+    return (mqtt_connected and mqtt_client is not None)
 
 
 # ============================================================
 # PUBLISH LOG
 # ============================================================
-
 def send_log(message):
     """
     Publish one message to wheelchair/logs.
@@ -254,7 +209,6 @@ def send_log(message):
 
     A network failure is deliberately swallowed.
     """
-
     global mqtt_client
     global mqtt_connected
 
@@ -262,16 +216,13 @@ def send_log(message):
         return False
 
     try:
-
         mqtt_client.publish( # type: ignore
             MQTT_LOG_TOPIC,
             str(message).encode()
         )
 
         return True
-
     except Exception:  # noqa: BLE001
-
         mqtt_client = None
         mqtt_connected = False
 
@@ -281,7 +232,6 @@ def send_log(message):
 # ============================================================
 # RECEIVE / SERVICE MQTT
 # ============================================================
-
 def check_messages():
     """
     Check once for incoming MQTT messages.
@@ -293,7 +243,6 @@ def check_messages():
     Returns True if MQTT remains usable.
     Returns False if MQTT is unavailable or an error occurs.
     """
-
     global mqtt_client
     global mqtt_connected
 
@@ -301,13 +250,10 @@ def check_messages():
         return False
 
     try:
-
         mqtt_client.check_msg() # type: ignore
 
         return True
-
     except Exception:  # noqa: BLE001
-
         mqtt_client = None
         mqtt_connected = False
 
@@ -317,7 +263,6 @@ def check_messages():
 # ============================================================
 # SELF-TEST
 # ============================================================
-
 def self_test():
     """
     Test MQTT communication.
@@ -337,7 +282,6 @@ def self_test():
 
     Stop the test with Ctrl-C.
     """
-
     print()
     print("==============================")
     print("MQTT MANAGER SELF-TEST")
@@ -347,41 +291,32 @@ def self_test():
     # --------------------------------------------------------
     # WIFI
     # --------------------------------------------------------
-
     print("1. Connecting to Wi-Fi...")
 
     try:
-
         from system import wifi_manager
-
     except ImportError:
-
         # This makes direct execution a little more convenient
         # on MicroPython installations where the import context
         # differs.
         import wifi_manager
 
     if not wifi_manager.is_connected() and not wifi_manager.connect():
-
         print()
         print("FAILED: Wi-Fi connection failed.")
         return
 
     print()
     print("OK: Wi-Fi connected.")
-    print(
-        f"IP: {wifi_manager.ip_address()}"
-    )
+    print(f"IP: {wifi_manager.ip_address()}")
 
     # --------------------------------------------------------
     # RECEIVE CALLBACK
     # --------------------------------------------------------
-
     print()
     print("2. Installing test command callback.")
 
     def test_command_received(command):
-
         print()
         print("------------------------------")
         print("COMMAND RECEIVED")
@@ -390,19 +325,15 @@ def self_test():
         print("------------------------------")
         print()
 
-    set_command_callback(
-        test_command_received
-    )
+    set_command_callback(test_command_received)
 
     # --------------------------------------------------------
     # MQTT CONNECTION
     # --------------------------------------------------------
-
     print()
     print("3. Connecting to MQTT...")
 
     if not connect():
-
         print()
         print("==============================")
         print("MQTT SELF-TEST FAILED")
@@ -412,16 +343,12 @@ def self_test():
     # --------------------------------------------------------
     # PUBLISH TEST
     # --------------------------------------------------------
-
     print()
     print("4. Testing MQTT publishing...")
 
     if send_log("MQTT manager self-test connected."):
-
         print("OK: Test log published.")
-
     else:
-
         print("FAILED: Could not publish test log.")
 
         disconnect()
@@ -431,13 +358,10 @@ def self_test():
     # --------------------------------------------------------
     # RECEIVE TEST
     # --------------------------------------------------------
-
     print()
     print("5. Testing MQTT reception.")
     print()
-    print(
-        "Send a command from the Mac, for example:"
-    )
+    print("Send a command from the Mac, for example:")
     print()
     print("    wheelchair-send hello")
     print()
@@ -446,30 +370,23 @@ def self_test():
     print()
 
     try:
-
         while True:
-
             if not check_messages():
-
                 print()
                 print("MQTT connection was lost.")
                 break
 
             sleep_ms(50)
-
     except KeyboardInterrupt:
-
         print()
         print("Self-test stopped.")
 
     # --------------------------------------------------------
     # CLEANUP
     # --------------------------------------------------------
-
     disconnect()
 
     print("MQTT disconnected.")
-
     print()
     print("==============================")
     print("MQTT SELF-TEST FINISHED")
@@ -480,7 +397,5 @@ def self_test():
 # ============================================================
 # RUN DIRECTLY
 # ============================================================
-
 if __name__ == "__main__":
-
     self_test()

@@ -46,7 +46,6 @@ except ImportError:
 # ============================================================
 # GITHUB SETTINGS
 # ============================================================
-
 GITHUB_USER = "fields007"
 GITHUB_REPO = "wheelchair-pico"
 GITHUB_BRANCH = "main"
@@ -68,7 +67,6 @@ REMOTE_VERSION_URL = BASE_URL + "version.txt"
 # ============================================================
 # LOCAL FILES
 # ============================================================
-
 CHAIR_FILE = "chair_logic.py"
 VERSION_FILE = "version.txt"
 
@@ -82,16 +80,13 @@ VERSION_NEW_FILE = "version_new.txt"
 # ============================================================
 # BASIC FILE HELPERS
 # ============================================================
-
 def _file_exists(filename):
     """
     Return True if a file exists.
     """
-
     try:
         os.stat(filename)
         return True
-
     except OSError:
         return False
 
@@ -100,10 +95,8 @@ def _remove_if_exists(filename):
     """
     Remove a file if it exists.
     """
-
     try:
         os.remove(filename)
-
     except OSError:
         pass
 
@@ -114,7 +107,6 @@ def _read_text_file(filename):
 
     Raises an exception if reading fails.
     """
-
     with open(filename, "r") as file:
         return file.read()
 
@@ -125,7 +117,6 @@ def _write_text_file(filename, text):
 
     Raises an exception if writing fails.
     """
-
     with open(filename, "w") as file:
         file.write(text)
 
@@ -134,11 +125,8 @@ def _copy_file(source, destination):
     """
     Copy one local file to another.
     """
-
     with open(source, "rb") as src, open(destination, "wb") as dst:
-
         while True:
-
             block = src.read(512)
 
             if not block:
@@ -150,25 +138,19 @@ def _copy_file(source, destination):
 # ============================================================
 # VERSION HANDLING
 # ============================================================
-
 def current_version():
     """
     Return the locally installed version as a string.
 
     Returns None if version.txt cannot be read.
     """
-
     try:
-
-        version = _read_text_file(
-            VERSION_FILE
-        ).strip()
+        version = _read_text_file(VERSION_FILE).strip()
 
         if not version:
             return None
 
         return version
-
     except Exception:  # noqa: BLE001
         return None
 
@@ -186,26 +168,18 @@ def _parse_version(version):
 
     Returns None if the version cannot be interpreted numerically.
     """
-
     if version is None:
         return None
 
     version = version.strip()
-
     version = version.removeprefix("v")
 
     if not version:
         return None
 
     try:
-
-        return tuple(
-            int(part)
-            for part in version.split(".")
-        )
-
+        return tuple(int(part) for part in version.split("."))
     except Exception:  # noqa: BLE001
-
         return None
 
 
@@ -222,37 +196,14 @@ def compare_versions(local_version, remote_version):
     is used. Different non-numeric versions are treated as
     different, with the remote version considered available.
     """
+    local_parsed = _parse_version(local_version)
+    remote_parsed = _parse_version(remote_version)
 
-    local_parsed = _parse_version(
-        local_version
-    )
-
-    remote_parsed = _parse_version(
-        remote_version
-    )
-
-    if (
-        local_parsed is not None
-        and remote_parsed is not None
-    ):
-
+    if (local_parsed is not None and remote_parsed is not None):
         # Make 1.2 equivalent to 1.2.0.
-        length = max(
-            len(local_parsed),
-            len(remote_parsed)
-        )
-
-        local_parsed = local_parsed + (
-            0,
-        ) * (
-            length - len(local_parsed)
-        )
-
-        remote_parsed = remote_parsed + (
-            0,
-        ) * (
-            length - len(remote_parsed)
-        )
+        length = max(len(local_parsed), len(remote_parsed))
+        local_parsed = local_parsed + (0,) * (length - len(local_parsed))
+        remote_parsed = remote_parsed + (0,) * (length - len(remote_parsed))
 
         if remote_parsed > local_parsed:
             return 1
@@ -271,53 +222,33 @@ def compare_versions(local_version, remote_version):
 # ============================================================
 # HTTP
 # ============================================================
-
 def _download_text(url):
     """
     Download a text file and return its contents.
 
     Raises an exception if the request fails.
     """
-
     response = None
 
     try:
-
         gc.collect()
 
-        response = requests.get(
-            url
-        )
-
-        status = getattr(
-            response,
-            "status_code",
-            200
-        )
+        response = requests.get(url)
+        status = getattr(response, "status_code", 200)
 
         if status != 200:
-
-            raise RuntimeError(
-                f"HTTP status {status}"
-            )
+            raise RuntimeError(f"HTTP status {status}")
 
         text = response.text
 
         if text is None:
-
-            raise RuntimeError(
-                "Downloaded file contains no text."
-            )
+            raise RuntimeError("Downloaded file contains no text.")
 
         return text
-
     finally:
-
         if response is not None:
-
             try:
                 response.close()
-
             except Exception:  # noqa: BLE001, S110
                 pass
 
@@ -330,16 +261,10 @@ def available_version():
 
     Raises an exception if GitHub cannot be reached.
     """
-
-    version = _download_text(
-        REMOTE_VERSION_URL
-    ).strip()
+    version = _download_text(REMOTE_VERSION_URL).strip()
 
     if not version:
-
-        raise RuntimeError(
-            "Remote version.txt is empty."
-        )
+        raise RuntimeError("Remote version.txt is empty.")
 
     return version
 
@@ -347,7 +272,6 @@ def available_version():
 # ============================================================
 # UPDATE CHECK
 # ============================================================
-
 def check_update():
     """
     Check whether GitHub contains a newer chair-logic version.
@@ -362,33 +286,20 @@ def check_update():
 
     Raises an exception if the remote version cannot be checked.
     """
-
     local = current_version()
 
     if local is None:
-
-        raise RuntimeError(
-            "Could not read local version.txt."
-        )
+        raise RuntimeError("Could not read local version.txt.")
 
     remote = available_version()
+    comparison = compare_versions(local, remote)
 
-    comparison = compare_versions(
-        local,
-        remote
-    )
-
-    return {
-        "local": local,
-        "remote": remote,
-        "update_available": comparison > 0
-    }
+    return {"local": local, "remote": remote, "update_available": comparison > 0}
 
 
 # ============================================================
 # PYTHON VALIDATION
 # ============================================================
-
 def validate_python(source):
     """
     Syntax-check Python source without executing it.
@@ -402,26 +313,17 @@ def validate_python(source):
 
     on failure.
     """
-
     try:
-
-        compile(
-            source,
-            CHAIR_FILE,
-            "exec"
-        )
+        compile(source, CHAIR_FILE, "exec")
 
         return True, None
-
     except Exception as error:  # noqa: BLE001
-
         return False, error
 
 
 # ============================================================
 # DOWNLOAD CANDIDATE
 # ============================================================
-
 def download_candidate(log=print):
     """
     Download the remote chair logic and version into temporary
@@ -436,80 +338,40 @@ def download_candidate(log=print):
 
     Raises an exception on failure.
     """
-
-    _remove_if_exists(
-        CHAIR_NEW_FILE
-    )
-
-    _remove_if_exists(
-        VERSION_NEW_FILE
-    )
+    _remove_if_exists(CHAIR_NEW_FILE)
+    _remove_if_exists(VERSION_NEW_FILE)
 
     try:
-
-        log(
-            "Downloading remote version."
-        )
+        log("Downloading remote version.")
 
         remote_version = available_version()
 
-        log(
-            f"Remote version: {remote_version}"
-        )
+        log(f"Remote version: {remote_version}")
+        log("Downloading chair_logic.py.")
 
-        log(
-            "Downloading chair_logic.py."
-        )
-
-        source = _download_text(
-            REMOTE_CHAIR_URL
-        )
+        source = _download_text(REMOTE_CHAIR_URL)
 
         if not source.strip():
+            raise RuntimeError("Downloaded chair_logic.py is empty.")
 
-            raise RuntimeError(
-                "Downloaded chair_logic.py is empty."
-            )
+        log("Checking downloaded Python syntax.")
 
-        log(
-            "Checking downloaded Python syntax."
-        )
-
-        valid, error = validate_python(
-            source
-        )
+        valid, error = validate_python(source)
 
         if not valid:
-
             raise RuntimeError(
                 f"Downloaded chair_logic.py failed syntax check: {error}"
             )
 
-        log(
-            "Downloaded chair_logic.py passed syntax check."
-        )
+        log("Downloaded chair_logic.py passed syntax check.")
 
-        _write_text_file(
-            CHAIR_NEW_FILE,
-            source
-        )
-
-        _write_text_file(
-            VERSION_NEW_FILE,
-            remote_version + "\n"
-        )
+        _write_text_file(CHAIR_NEW_FILE, source)
+        _write_text_file(VERSION_NEW_FILE, remote_version + "\n")
 
         return remote_version
-
     except Exception:
-
-        _remove_if_exists(
-            CHAIR_NEW_FILE
-        )
-
-        _remove_if_exists(
-            VERSION_NEW_FILE
-        )
+        _remove_if_exists(CHAIR_NEW_FILE)
+        _remove_if_exists(VERSION_NEW_FILE)
 
         raise
 
@@ -517,7 +379,6 @@ def download_candidate(log=print):
 # ============================================================
 # BACKUP
 # ============================================================
-
 def create_backup(log=print):
     """
     Create a backup of the currently installed chair logic
@@ -527,62 +388,30 @@ def create_backup(log=print):
 
     Raises an exception on failure.
     """
+    if not _file_exists(CHAIR_FILE):
+        raise RuntimeError("Current chair_logic.py does not exist.")
 
-    if not _file_exists(
-        CHAIR_FILE
-    ):
+    if not _file_exists(VERSION_FILE):
+        raise RuntimeError("Current version.txt does not exist.")
 
-        raise RuntimeError(
-            "Current chair_logic.py does not exist."
-        )
+    log("Creating chair logic backup.")
 
-    if not _file_exists(
-        VERSION_FILE
-    ):
+    _copy_file(CHAIR_FILE, CHAIR_BACKUP_FILE)
+    _copy_file(VERSION_FILE, VERSION_BACKUP_FILE)
 
-        raise RuntimeError(
-            "Current version.txt does not exist."
-        )
-
-    log(
-        "Creating chair logic backup."
-    )
-
-    _copy_file(
-        CHAIR_FILE,
-        CHAIR_BACKUP_FILE
-    )
-
-    _copy_file(
-        VERSION_FILE,
-        VERSION_BACKUP_FILE
-    )
-
-    log(
-        "Backup created."
-    )
+    log("Backup created.")
 
 
 def backup_available():
     """
     Return True only when both rollback files exist.
     """
-
-    return (
-        _file_exists(
-            CHAIR_BACKUP_FILE
-        )
-        and
-        _file_exists(
-            VERSION_BACKUP_FILE
-        )
-    )
+    return (_file_exists(CHAIR_BACKUP_FILE) and _file_exists(VERSION_BACKUP_FILE))
 
 
 # ============================================================
 # INSTALL UPDATE
 # ============================================================
-
 def update(log=print):
     """
     Download and install the current GitHub chair logic.
@@ -604,149 +433,76 @@ def update(log=print):
 
     Raises an exception if installation fails.
     """
-
     local_version = current_version()
 
     if local_version is None:
+        raise RuntimeError("Could not read local version.txt.")
 
-        raise RuntimeError(
-            "Could not read local version.txt."
-        )
-
-    log(
-        f"Installed version: {local_version}"
-    )
+    log(f"Installed version: {local_version}")
 
     remote_version = available_version()
 
-    log(
-        f"GitHub version: {remote_version}"
-    )
+    log(f"GitHub version: {remote_version}")
 
-    comparison = compare_versions(
-        local_version,
-        remote_version
-    )
+    comparison = compare_versions(local_version, remote_version)
 
     if comparison == 0:
-
-        log(
-            "Already running the current version."
-        )
+        log("Already running the current version.")
 
         return False
 
     if comparison < 0:
-
-        log(
-            "GitHub version is older than installed version."
-        )
+        log("GitHub version is older than installed version.")
 
         return False
 
     # Download and validate BEFORE touching the working files.
-    downloaded_version = download_candidate(
-        log=log
-    )
+    downloaded_version = download_candidate(log=log)
 
     if downloaded_version != remote_version:
+        _remove_if_exists(CHAIR_NEW_FILE)
+        _remove_if_exists(VERSION_NEW_FILE)
 
-        _remove_if_exists(
-            CHAIR_NEW_FILE
-        )
-
-        _remove_if_exists(
-            VERSION_NEW_FILE
-        )
-
-        raise RuntimeError(
-            "Remote version changed during update."
-        )
+        raise RuntimeError("Remote version changed during update.")
 
     # Only now do we touch the existing installation.
-    create_backup(
-        log=log
-    )
+    create_backup(log=log)
 
     try:
-
-        log(
-            "Installing new chair logic."
-        )
+        log("Installing new chair logic.")
 
         # Copy instead of rename so that the temporary files
         # remain available until both active files have been
         # successfully written.
-        _copy_file(
-            CHAIR_NEW_FILE,
-            CHAIR_FILE
-        )
-
-        _copy_file(
-            VERSION_NEW_FILE,
-            VERSION_FILE
-        )
+        _copy_file(CHAIR_NEW_FILE, CHAIR_FILE)
+        _copy_file(VERSION_NEW_FILE, VERSION_FILE)
 
         # Verify the installed version file.
         installed_version = current_version()
 
         if installed_version != remote_version:
+            raise RuntimeError("Installed version verification failed.")
 
-            raise RuntimeError(
-                "Installed version verification failed."
-            )
-
-        log(
-            "Update installed successfully."
-        )
-
-        log(
-            f"Installed version: {installed_version}"
-        )
-
+        log("Update installed successfully.")
+        log(f"Installed version: {installed_version}")
     except Exception as install_error:
-
-        log(
-            "Installation failed."
-        )
-
-        log(
-            "Restoring previous version."
-        )
+        log("Installation failed.")
+        log("Restoring previous version.")
 
         try:
+            _copy_file(CHAIR_BACKUP_FILE, CHAIR_FILE)
+            _copy_file(VERSION_BACKUP_FILE, VERSION_FILE)
 
-            _copy_file(
-                CHAIR_BACKUP_FILE,
-                CHAIR_FILE
-            )
-
-            _copy_file(
-                VERSION_BACKUP_FILE,
-                VERSION_FILE
-            )
-
-            log(
-                "Previous version restored."
-            )
-
+            log("Previous version restored.")
         except Exception as restore_error:  # noqa: BLE001
-
             raise RuntimeError(
                 f"Update failed: {install_error} ; automatic restore also failed: {restore_error}"
             )
 
         raise install_error  # noqa: TRY201
-
     finally:
-
-        _remove_if_exists(
-            CHAIR_NEW_FILE
-        )
-
-        _remove_if_exists(
-            VERSION_NEW_FILE
-        )
+        _remove_if_exists(CHAIR_NEW_FILE)
+        _remove_if_exists(VERSION_NEW_FILE)
 
     return True
 
@@ -754,7 +510,6 @@ def update(log=print):
 # ============================================================
 # ROLLBACK
 # ============================================================
-
 def rollback(log=print):
     """
     Restore the previous chair logic and version.
@@ -769,59 +524,28 @@ def rollback(log=print):
     Raises an exception if no complete backup exists or the
     restore fails.
     """
-
     if not backup_available():
+        raise RuntimeError("No complete rollback backup is available.")
 
-        raise RuntimeError(
-            "No complete rollback backup is available."
-        )
-
-    log(
-        "Restoring chair logic backup."
-    )
+    log("Restoring chair logic backup.")
 
     # Validate backup code before replacing the active file.
-    backup_source = _read_text_file(
-        CHAIR_BACKUP_FILE
-    )
-
-    valid, error = validate_python(
-        backup_source
-    )
+    backup_source = _read_text_file(CHAIR_BACKUP_FILE)
+    valid, error = validate_python(backup_source)
 
     if not valid:
+        raise RuntimeError(f"Backup chair logic failed syntax check: {error}")
 
-        raise RuntimeError(
-            f"Backup chair logic failed syntax check: {error}"
-        )
-
-    backup_version = _read_text_file(
-        VERSION_BACKUP_FILE
-    ).strip()
+    backup_version = _read_text_file(VERSION_BACKUP_FILE).strip()
 
     if not backup_version:
+        raise RuntimeError("Backup version is empty.")
 
-        raise RuntimeError(
-            "Backup version is empty."
-        )
+    _copy_file(CHAIR_BACKUP_FILE, CHAIR_FILE)
+    _copy_file(VERSION_BACKUP_FILE, VERSION_FILE)
 
-    _copy_file(
-        CHAIR_BACKUP_FILE,
-        CHAIR_FILE
-    )
-
-    _copy_file(
-        VERSION_BACKUP_FILE,
-        VERSION_FILE
-    )
-
-    log(
-        "Rollback completed."
-    )
-
-    log(
-        f"Restored version: {backup_version}"
-    )
+    log("Rollback completed.")
+    log(f"Restored version: {backup_version}")
 
     return True
 
@@ -829,7 +553,6 @@ def rollback(log=print):
 # ============================================================
 # SELF-TEST
 # ============================================================
-
 def self_test():
     """
     Perform a safe updater self-test.
@@ -851,7 +574,6 @@ def self_test():
     - perform a rollback
     - reboot the Pico
     """
-
     print()
     print("==============================")
     print("UPDATER SELF-TEST")
@@ -861,209 +583,124 @@ def self_test():
     # --------------------------------------------------------
     # LOCAL VERSION
     # --------------------------------------------------------
-
     print("1. Reading installed version...")
 
     local_version = current_version()
 
     if local_version is None:
-
-        print(
-            "FAILED: Could not read version.txt."
-        )
+        print("FAILED: Could not read version.txt.")
 
         return
 
-    print(
-        f"OK: Installed version: {local_version}"
-    )
+    print(f"OK: Installed version: {local_version}")
 
     # --------------------------------------------------------
     # WIFI
     # --------------------------------------------------------
-
     print()
     print("2. Checking Wi-Fi...")
 
     try:
-
         from system import wifi_manager
-
     except ImportError:
-
         # Useful if this file is run directly in a different
         # MicroPython import context.
         import wifi_manager
 
     if not wifi_manager.is_connected():
-
-        print(
-            "Wi-Fi is not connected. Connecting..."
-        )
+        print("Wi-Fi is not connected. Connecting...")
 
         if not wifi_manager.connect():
-
             print()
-            print(
-                "FAILED: Could not connect to Wi-Fi."
-            )
+            print("FAILED: Could not connect to Wi-Fi.")
 
             return
 
-    print(
-        "OK: Wi-Fi connected."
-    )
+    print("OK: Wi-Fi connected.")
 
     if wifi_manager.current_ssid() is not None:
-
-        print(
-            f"SSID: {wifi_manager.current_ssid()}"
-        )
+        print(f"SSID: {wifi_manager.current_ssid()}")
 
     if wifi_manager.ip_address() is not None:
-
-        print(
-            f"IP: {wifi_manager.ip_address()}"
-        )
+        print(f"IP: {wifi_manager.ip_address()}")
 
     # --------------------------------------------------------
     # REMOTE VERSION
     # --------------------------------------------------------
-
     print()
     print("3. Reading GitHub version...")
 
     try:
-
         remote_version = available_version()
-
     except Exception as error:  # noqa: BLE001
-
-        print(
-            f"FAILED: {error}"
-        )
+        print(f"FAILED: {error}")
 
         return
 
-    print(
-        f"OK: GitHub version: {remote_version}"
-    )
+    print(f"OK: GitHub version: {remote_version}")
 
     # --------------------------------------------------------
     # VERSION COMPARISON
     # --------------------------------------------------------
-
     print()
     print("4. Comparing versions...")
 
-    comparison = compare_versions(
-        local_version,
-        remote_version
-    )
+    comparison = compare_versions(local_version, remote_version)
 
     if comparison > 0:
-
-        print(
-            "A newer version is available."
-        )
-
+        print("A newer version is available.")
     elif comparison < 0:
-
-        print(
-            "The installed version is newer than GitHub."
-        )
-
+        print("The installed version is newer than GitHub.")
     else:
-
-        print(
-            "Installed and GitHub versions are the same."
-        )
+        print("Installed and GitHub versions are the same.")
 
     # --------------------------------------------------------
     # DOWNLOAD + VALIDATION
     # --------------------------------------------------------
-
     print()
-    print(
-        "5. Downloading and validating GitHub chair_logic.py..."
-    )
+    print("5. Downloading and validating GitHub chair_logic.py...")
 
     # Important: ensure the test starts without stale temporary
     # files.
-    _remove_if_exists(
-        CHAIR_NEW_FILE
-    )
-
-    _remove_if_exists(
-        VERSION_NEW_FILE
-    )
+    _remove_if_exists(CHAIR_NEW_FILE)
+    _remove_if_exists(VERSION_NEW_FILE)
 
     try:
-
-        downloaded_version = download_candidate(
-            log=print
-        )
+        downloaded_version = download_candidate(log=print)
 
         print()
-        print(
-            f"OK: Candidate version {downloaded_version} downloaded and validated."
-        )
-
+        print(f"OK: Candidate version {downloaded_version} downloaded and validated.")
     except Exception as error:  # noqa: BLE001
-
         print()
-        print(
-            f"FAILED: {error}"
-        )
+        print(f"FAILED: {error}")
 
         return
-
     finally:
-
         # The self-test must leave no candidate files behind.
-        _remove_if_exists(
-            CHAIR_NEW_FILE
-        )
-
-        _remove_if_exists(
-            VERSION_NEW_FILE
-        )
+        _remove_if_exists(CHAIR_NEW_FILE)
+        _remove_if_exists(VERSION_NEW_FILE)
 
     # --------------------------------------------------------
     # VERIFY NON-DESTRUCTIVE CLEANUP
     # --------------------------------------------------------
-
     print()
     print("6. Checking self-test cleanup...")
 
-    if (
-        _file_exists(CHAIR_NEW_FILE)
-        or
-        _file_exists(VERSION_NEW_FILE)
-    ):
-
-        print(
-            "FAILED: Temporary files remain."
-        )
+    if (_file_exists(CHAIR_NEW_FILE) or _file_exists(VERSION_NEW_FILE)):
+        print("FAILED: Temporary files remain.")
 
         return
 
     if current_version() != local_version:
-
-        print(
-            "FAILED: Installed version changed during test."
-        )
+        print("FAILED: Installed version changed during test.")
 
         return
 
-    print(
-        "OK: Installed files were not changed."
-    )
+    print("OK: Installed files were not changed.")
 
     # --------------------------------------------------------
     # RESULT
     # --------------------------------------------------------
-
     print()
     print("==============================")
     print("UPDATER SELF-TEST PASSED")
@@ -1074,7 +711,5 @@ def self_test():
 # ============================================================
 # RUN DIRECTLY
 # ============================================================
-
 if __name__ == "__main__":
-
     self_test()
