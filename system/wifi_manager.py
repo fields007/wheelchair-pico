@@ -18,11 +18,10 @@ When run directly:
     A non-destructive Wi-Fi self-test is performed.
 """
 
-import network
 import json
+from time import sleep_ms, ticks_diff, ticks_ms
 
-from time import sleep_ms, ticks_ms, ticks_diff
-
+import network
 
 # ============================================================
 # SETTINGS
@@ -58,7 +57,7 @@ def load_networks():
         with open(WIFI_FILE, "r") as file:
             config = json.load(file)
 
-    except Exception:
+    except Exception:  # noqa: BLE001
         return []
 
     networks = config.get(
@@ -98,7 +97,7 @@ def save_networks(networks):
 
         return True
 
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -176,9 +175,7 @@ def connect(log=print):
         return False
 
     log(
-        "Found {} configured Wi-Fi network(s).".format(
-            len(networks)
-        )
+        f"Found {len(networks)} configured Wi-Fi network(s)."
     )
 
     # Use the current MicroPython station-interface API.
@@ -197,9 +194,7 @@ def connect(log=print):
         log("Wi-Fi already connected.")
 
         log(
-            "IP address: {}".format(
-                wlan.ifconfig()[0]
-            )
+            f"IP address: {wlan.ifconfig()[0]}"
         )
 
         return True
@@ -215,12 +210,10 @@ def connect(log=print):
 
         wlan.scan()
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         log(
-            "Initial Wi-Fi scan failed: {}".format(
-                error
-            )
+            f"Initial Wi-Fi scan failed: {error}"
         )
 
     for entry in networks:
@@ -239,9 +232,7 @@ def connect(log=print):
             continue
 
         log(
-            "Trying Wi-Fi: {}".format(
-                ssid
-            )
+            f"Trying Wi-Fi: {ssid}"
         )
 
         # Disconnect from any previous failed attempt.
@@ -249,8 +240,7 @@ def connect(log=print):
 
             wlan.disconnect()
 
-        except Exception:
-
+        except Exception:  # noqa: BLE001, S110
             pass
 
         sleep_ms(200)
@@ -262,13 +252,10 @@ def connect(log=print):
                 password
             )
 
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
 
             log(
-                "Could not start Wi-Fi connection to {}: {}".format(
-                    ssid,
-                    error
-                )
+                f"Could not start Wi-Fi connection to {ssid}: {error}"
             )
 
             continue
@@ -283,9 +270,7 @@ def connect(log=print):
             ) >= WIFI_TIMEOUT_MS:
 
                 log(
-                    "Wi-Fi timed out: {}".format(
-                        ssid
-                    )
+                    f"Wi-Fi timed out: {ssid}"
                 )
 
                 break
@@ -295,15 +280,11 @@ def connect(log=print):
         if wlan.isconnected():
 
             log(
-                "Connected to Wi-Fi: {}".format(
-                    ssid
-                )
+                f"Connected to Wi-Fi: {ssid}"
             )
 
             log(
-                "IP address: {}".format(
-                    wlan.ifconfig()[0]
-                )
+                f"IP address: {wlan.ifconfig()[0]}"
             )
 
             return True
@@ -331,7 +312,7 @@ def is_connected():
 
         return wlan.isconnected()
 
-    except Exception:
+    except Exception:  # noqa: BLE001
 
         return False
 
@@ -348,9 +329,9 @@ def ip_address():
 
     try:
 
-        return wlan.ifconfig()[0]
+        return wlan.ifconfig()[0] # type: ignore
 
-    except Exception:
+    except Exception:  # noqa: BLE001
 
         return None
 
@@ -367,9 +348,9 @@ def current_ssid():
 
     try:
 
-        return wlan.config("ssid")
+        return wlan.config("ssid") # type: ignore
 
-    except Exception:
+    except Exception:  # noqa: BLE001
 
         return None
 
@@ -413,9 +394,7 @@ def self_test():
         return
 
     print(
-        "OK: Found {} configured network(s).".format(
-            len(networks)
-        )
+        f"OK: Found {len(networks)} configured network(s)."
     )
 
     for index, entry in enumerate(networks):
@@ -429,10 +408,7 @@ def self_test():
         )
 
         print(
-            "   {}: {}".format(
-                index + 1,
-                ssid
-            )
+            f"   {index + 1}: {ssid}"
         )
 
     print()
@@ -466,21 +442,15 @@ def self_test():
     print("3. Testing status functions...")
 
     print(
-        "   is_connected(): {}".format(
-            is_connected()
-        )
+        f"   is_connected(): {is_connected()}"
     )
 
     print(
-        "   current_ssid(): {}".format(
-            current_ssid()
-        )
+        f"   current_ssid(): {current_ssid()}"
     )
 
     print(
-        "   ip_address(): {}".format(
-            ip_address()
-        )
+        f"   ip_address(): {ip_address()}"
     )
 
     print()

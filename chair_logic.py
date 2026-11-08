@@ -9,13 +9,13 @@ Supervisor interface: run(stop_requested, log), stop_outputs().
 Layout uses x=8..119 and y=7..56 to avoid rounded/cut-off corners.
 Calibrate IMU only when wheelchair is LEVEL and STILL.
 """
-from machine import Pin, I2C
-from time import sleep_ms, ticks_ms, ticks_diff
+from time import sleep_ms, ticks_diff, ticks_ms, ticks_us
+
 import framebuf
-import ssd1306
 import network
-from machine import ADC, PWM, disable_irq, enable_irq
-from time import ticks_us
+from machine import ADC, I2C, PWM, Pin, disable_irq, enable_irq
+
+import ssd1306
 
 # ============================================================
 # 1. HARDWARE MAP AND CALIBRATED INPUT VALUES
@@ -45,7 +45,7 @@ OLED_I2C_ADDRESS = 0x3C
 # This is a DISPLAY estimate, not a safety-rated tilt measurement.
 # The 8.5..11.1 m/s2 rejection is suitable for stationary testing,
 # NOT for motion safety decisions.
-from math import sqrt, atan2, pi
+from math import atan2, pi, sqrt
 
 G = 9.80665
 ACC_SCALE = G / 16384.0
@@ -111,7 +111,7 @@ def imu_calibrate(stop_requested=None):
     global _imu_basis, _imu_filtered
     sums = [0.0, 0.0, 0.0]
     good = 0
-    for attempt in range(IMU_CAL_MAX_ATTEMPTS):
+    for _ in range(IMU_CAL_MAX_ATTEMPTS):
         if stop_requested is not None and stop_requested():
             return False
         try:
@@ -126,7 +126,7 @@ def imu_calibrate(stop_requested=None):
             pass
         sleep_ms(30)
     if good < IMU_CAL_SAMPLES:
-        raise RuntimeError("Only {} valid IMU samples".format(good))
+        raise RuntimeError(f"Only {good} valid IMU samples")
     reference = tuple(x / good for x in sums)
     _imu_basis = create_basis(reference)
     _imu_filtered = imu_rotate(reference)
@@ -134,6 +134,8 @@ def imu_calibrate(stop_requested=None):
 
 
 def imu_read_accel():
+    if _imu_i2c is None:
+        raise OSError("IMU I2C is not initialized")
     raw = _imu_i2c.readfrom_mem(IMU_I2C_ADDRESS, 0x3B, 6)
     if len(raw) != 6:
         raise OSError("Short IMU read")
@@ -141,7 +143,7 @@ def imu_read_accel():
 
 
 def imu_rotate(v):
-    return tuple(dot(v, axis) for axis in _imu_basis)
+    return tuple(dot(v, axis) for axis in _imu_basis) # type: ignore
 
 
 def imu_initialize(i2c, stop_requested=None, log=print):
@@ -153,7 +155,7 @@ def imu_initialize(i2c, stop_requested=None, log=print):
         if IMU_I2C_ADDRESS not in devices:
             raise OSError("IMU 0x68 not found")
         who = i2c.readfrom_mem(IMU_I2C_ADDRESS, 0x75, 1)[0]
-        log("IMU WHO_AM_I: 0x{:02X}".format(who))
+        log(f"IMU WHO_AM_I: 0x{who:02X}")
         imu_configure()
         if not imu_calibrate(stop_requested):
             return False
@@ -161,21 +163,24 @@ def imu_initialize(i2c, stop_requested=None, log=print):
         _imu_error = None
         log("IMU level calibration successful")
         return True
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         _imu_ok = False
         _imu_error = repr(exc)
-        log("IMU initialization failed: {}".format(_imu_error))
+        log(f"IMU initialization failed: {_imu_error}")
         return False
     finally:
         _imu_last_retry = ticks_ms()
 
 
 def imu_configure():
-    _imu_i2c.writeto_mem(IMU_I2C_ADDRESS, 0x6B, b"\x01")
+    i2c = _imu_i2c
+    if i2c is None:
+        raise OSError("IMU I2sC is not initialized")
+    i2c.writeto_mem(IMU_I2C_ADDRESS, 0x6B, b"\x01")
     sleep_ms(100)
-    _imu_i2c.writeto_mem(IMU_I2C_ADDRESS, 0x1C, b"\x00")
-    _imu_i2c.writeto_mem(IMU_I2C_ADDRESS, 0x1B, b"\x00")
-    _imu_i2c.writeto_mem(IMU_I2C_ADDRESS, 0x1A, b"\x03")
+    i2c.writeto_mem(IMU_I2C_ADDRESS, 0x1C, b"\x00")
+    i2c.writeto_mem(IMU_I2C_ADDRESS, 0x1B, b"\x00")
+    i2c.writeto_mem(IMU_I2C_ADDRESS, 0x1A, b"\x03")
     sleep_ms(100)
 
 
@@ -197,7 +202,7 @@ def imu_update(now):
             return _imu_pitch_deg
         leveled = imu_rotate(a)
         _imu_filtered = tuple(
-            (1.0 - IMU_FILTER_ALPHA) * _imu_filtered[i]
+            (1.0 - IMU_FILTER_ALPHA) * _imu_filtered[i] # type: ignore
             + IMU_FILTER_ALPHA * leveled[i] for i in range(3)
         )
         ax, ay, az = _imu_filtered
@@ -311,7 +316,8 @@ def select_motor_direction(direction):
         raise ValueError('Invalid motor direction')
 
 MIN_MOTOR_VOLTAGE = 1.60
-REVERSE_VOLTAGE_MULTIPLIER = 1.20
+STARTUP_SPEED_KMH = 2.0
+STARTUP_MAX_STEP_FRACTION = 0.5
 ROAD_MAX_VOLTAGE = {'LOW': 1.90, 'MEDIUM': 2.20, 'HIGH': 3.30}
 TERRAIN_FRONT_MAX_VOLTAGE = 1.80
 TERRAIN_REAR_MULTIPLIER = {'LOW': 1.00, 'MEDIUM': 1.2, 'HIGH': 1.5}
@@ -379,8 +385,8 @@ def reset_motor_ramp():
     disable_motors()
 
 def voltage_to_duty(voltage):
-    return int(round(clamp(voltage, 0, PICO_PWM_VOLTAGE) /
-                     PICO_PWM_VOLTAGE * 65535))
+    return round(clamp(voltage, 0, PICO_PWM_VOLTAGE) /
+                     PICO_PWM_VOLTAGE * 65535)
 
 def set_motor_voltages(front_voltage, rear_voltage):
     # This function is a last-line software interlock, not an independent E-stop.
@@ -403,13 +409,16 @@ def get_front_max_voltage(mode, speed):
         return TERRAIN_FRONT_MAX_VOLTAGE
     return ROAD_MAX_VOLTAGE[speed]
 
-def joystick_to_motor_voltage(y, mode, speed):
+def joystick_to_motor_voltage(y, mode, speed, direction):
     throttle = get_throttle_request(y)
     if throttle <= 0.0:
         return 0.0
     if throttle <= MIN_VOLTAGE_REGION:
         return MIN_MOTOR_VOLTAGE
-    maximum = get_front_max_voltage(mode, speed)
+    maximum = (
+        PICO_PWM_VOLTAGE if direction == 'REVERSE'
+        else get_front_max_voltage(mode, speed)
+    )
     fraction = clamp((throttle - MIN_VOLTAGE_REGION) /
                      (1.0 - MIN_VOLTAGE_REGION), 0, 1)
     return MIN_MOTOR_VOLTAGE + fraction**THROTTLE_EXPONENT * (maximum-MIN_MOTOR_VOLTAGE)
@@ -421,7 +430,7 @@ def get_rear_voltage(front_voltage, mode, speed):
         return front_voltage
     return min(PICO_PWM_VOLTAGE, front_voltage*TERRAIN_REAR_MULTIPLIER[speed])
 
-def update_motor_voltage(target_v, mode, speed):
+def update_motor_voltage(target_v, mode, speed, slow_start):
     global motor_current_v, rear_current_v, motor_accel_step_v
 
     # Select acceleration parameters according to speed setting.
@@ -433,29 +442,18 @@ def update_motor_voltage(target_v, mode, speed):
     start_step = ramp['start_step'] * multiplier
     acceleration = ramp['acceleration'] * multiplier
 
-    # Immediate throttle cutoff when requested.
-    if target_v <= 0.0:
-        motor_current_v = 0.0
-        rear_current_v = 0.0
-        motor_accel_step_v = start_step
-        set_motor_voltages(0.0, 0.0)
-        return (0.0, 0.0)
-
-    # Front motors.
-    if motor_current_v <= 0.0:
+    # Start at the lowest command that produces PWM.
+    if target_v > 0.0 and motor_current_v < MIN_MOTOR_VOLTAGE:
         motor_current_v = MIN_MOTOR_VOLTAGE
         motor_accel_step_v = start_step
 
     elif motor_current_v < target_v:
-        motor_current_v += min(
-            motor_accel_step_v,
-            target_v - motor_current_v
-        )
-
-        motor_accel_step_v = min(
-            motor_accel_step_v + acceleration,
-            max_step
-        )
+        step = max_step
+        if slow_start:
+            startup_limit = max_step * STARTUP_MAX_STEP_FRACTION
+            step = min(motor_accel_step_v, startup_limit)
+            motor_accel_step_v = min(step + acceleration, startup_limit)
+        motor_current_v += min(step, target_v - motor_current_v)
 
     elif motor_current_v > target_v:
         motor_current_v -= min(
@@ -468,11 +466,12 @@ def update_motor_voltage(target_v, mode, speed):
     )
 
     # Rear motors.
-    rear_target_v = get_rear_voltage(
-        motor_current_v, mode, speed
+    rear_target_v = (
+        get_rear_voltage(motor_current_v, mode, speed)
+        if target_v > 0.0 else 0.0
     )
 
-    if rear_current_v <= 0.0:
+    if target_v > 0.0 and rear_current_v < MIN_MOTOR_VOLTAGE:
         rear_current_v = MIN_MOTOR_VOLTAGE
 
     elif rear_current_v < rear_target_v:
@@ -640,7 +639,7 @@ def update_servo(target_us, mode, speed, joystick_x,
 
     # Keep the main loop fast, but update steering at 50 Hz.
     if dt_ms < STEERING_UPDATE_INTERVAL_MS:
-        return int(round(servo_current_us))
+        return round(servo_current_us)
 
     servo_last_update_ms = now
 
@@ -682,7 +681,7 @@ def update_servo(target_us, mode, speed, joystick_x,
     else:
         set_servo_us(servo_current_us)
 
-    return int(round(servo_current_us))
+    return round(servo_current_us)
 
 # ============================================================
 # 5. BRAKE LOGIC -- reed interlock + handbrake servo
@@ -733,7 +732,7 @@ def update_handbrake(now, log=print):
     if raw != handbrake_last_raw:
         handbrake_last_raw = raw
         handbrake_raw_since = now
-    if ticks_diff(now, handbrake_raw_since) >= HANDBRAKE_DEBOUNCE_MS:
+    if ticks_diff(now, handbrake_raw_since) >= HANDBRAKE_DEBOUNCE_MS:  # noqa: SIM102
         if raw != handbrake_stable:
             handbrake_stable = raw
             if raw == 1:
@@ -742,12 +741,12 @@ def update_handbrake(now, log=print):
                 handbrake_press_latched = True
                 handbrake_active_since = now
                 set_handbrake_servo_us(HANDBRAKE_ACTIVE_US)
-                log('Handbrake servo: {}us (activated)'.format(handbrake_servo_us))
+                log(f'Handbrake servo: {handbrake_servo_us}us (activated)')
     if (handbrake_active_since is not None and
             ticks_diff(now, handbrake_active_since) >= HANDBRAKE_HOLD_MS):
         handbrake_active_since = None
         set_handbrake_servo_us(HANDBRAKE_REST_US)
-        log('Handbrake servo: {}us (returned)'.format(handbrake_servo_us))
+        log(f'Handbrake servo: {handbrake_servo_us}us (returned)')
     return handbrake_active_since is not None
 
 # ============================================================
@@ -889,7 +888,7 @@ def draw_idle(oled, state):
 
     # Row 1: Slope
     if state.imu_ok:
-        text = 'slope: {:+.1f}'.format(state.pitch_deg)
+        text = f'slope: {state.pitch_deg:+.1f}'
         x = (WIDTH - (len(text) * 8 + 4)) // 2
         draw_text(oled, text, x, 8)
         draw_degree(oled, x + len(text) * 8, 8)
@@ -897,10 +896,10 @@ def draw_idle(oled, state):
         centered(oled, 'slope: N/A', 8)
 
     # Row 2: Mode
-    centered(oled, 'mode: {}'.format(mode_short(state.mode)), 20)
+    centered(oled, f'mode: {mode_short(state.mode)}', 20)
 
     # Row 3: Speed setting
-    centered(oled, 'speed: {}'.format(state.speed_setting), 32)
+    centered(oled, f'speed: {state.speed_setting}', 32)
 
     # Row 4: Network status
     centered(oled, 'ONLINE' if state.online else 'OFFLINE', 44)
@@ -909,10 +908,9 @@ def draw_idle(oled, state):
 def draw_driving(oled, state):
     centered(oled, 'SPEED', 8, 1)
     # e.g. '12.4' at 2x => 64 px wide; legible without corner clipping.
-    centered(oled, '{:.1f}'.format(state.speed_kmh), 20, 2)
+    centered(oled, f'{state.speed_kmh:.1f}', 20, 2)
     centered(oled, 'km/h', 39, 1)
-    centered(oled, '{}  {}'.format(mode_short(state.mode),
-                                   state.speed_setting), 49, 1)
+    centered(oled, f'{mode_short(state.mode)}  {state.speed_setting}', 49, 1)
 
 
 def draw_change(oled, label, value):
@@ -1161,11 +1159,7 @@ def run(stop_requested=None, log=print):
                     direction_state = 'SETTLING'
                     direction_state_since = loop_start
 
-                    log(
-                        'Motor direction selected: {}'.format(
-                            selected_direction
-                        )
-                    )
+                    log(f'Motor direction selected: {selected_direction}')
 
 
             elif direction_state == 'SETTLING':
@@ -1202,29 +1196,31 @@ def run(stop_requested=None, log=print):
                 and requested_direction == selected_direction
             )
 
-            target = (
-                joystick_to_motor_voltage(y, mode, speed)
-                if drive_allowed
-                else 0.0
+            rolling = SPEED_KMH > STARTUP_SPEED_KMH
+            rolling_neutral = (
+                joystick_neutral and rolling
+                and direction_state == 'READY' and not brakes_on
             )
-
-            if drive_allowed and direction == 'REVERSE':
-                target = min(
-                    PICO_PWM_VOLTAGE,
-                    MIN_MOTOR_VOLTAGE
-                    + (target - MIN_MOTOR_VOLTAGE) * REVERSE_VOLTAGE_MULTIPLIER
+            if drive_allowed:
+                target = joystick_to_motor_voltage(y, mode, speed, direction)
+                update_motor_voltage(
+                    target, mode, speed,
+                    slow_start=(direction == 'FORWARD' and not rolling),
                 )
+            elif rolling_neutral:
+                update_motor_voltage(0.0, mode, speed, slow_start=False)
+            else:
+                reset_motor_ramp()
 
-            update_motor_voltage(target, mode, speed)
             # Final brake interlock after the motor update.
             if read_reed_switch() == 0 or handbrake_active_since is not None:
                 reset_motor_ramp()
 
             if mode != previous_mode:
-                log('Mode: {}'.format(mode))
+                log(f'Mode: {mode}')
                 previous_mode = mode
             if speed != previous_speed:
-                log('Speed setting: {}'.format(speed))
+                log(f'Speed setting: {speed}')
                 previous_speed = speed
 
             now = ticks_ms()
@@ -1240,7 +1236,7 @@ def run(stop_requested=None, log=print):
                         mode,
                         speed,
                         SPEED_KMH,
-                        '{:+.1f}'.format(get_pitch_degrees())
+                        f'{get_pitch_degrees():+.1f}'
                         if imu_is_healthy() else 'N/A',
                         'ON' if brakes_on else 'OFF',
                         selected_direction,
@@ -1258,7 +1254,7 @@ def run(stop_requested=None, log=print):
             try:
                 _oled.fill(0)
                 _oled.show()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
 

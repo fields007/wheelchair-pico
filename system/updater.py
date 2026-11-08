@@ -34,8 +34,8 @@ When run directly:
     A safe, non-destructive updater self-test is performed.
 """
 
-import os
 import gc
+import os
 
 try:
     import requests
@@ -135,18 +135,16 @@ def _copy_file(source, destination):
     Copy one local file to another.
     """
 
-    with open(source, "rb") as src:
+    with open(source, "rb") as src, open(destination, "wb") as dst:
 
-        with open(destination, "wb") as dst:
+        while True:
 
-            while True:
+            block = src.read(512)
 
-                block = src.read(512)
+            if not block:
+                break
 
-                if not block:
-                    break
-
-                dst.write(block)
+            dst.write(block)
 
 
 # ============================================================
@@ -171,7 +169,7 @@ def current_version():
 
         return version
 
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -194,8 +192,7 @@ def _parse_version(version):
 
     version = version.strip()
 
-    if version.startswith("v"):
-        version = version[1:]
+    version = version.removeprefix("v")
 
     if not version:
         return None
@@ -207,7 +204,7 @@ def _parse_version(version):
             for part in version.split(".")
         )
 
-    except Exception:
+    except Exception:  # noqa: BLE001
 
         return None
 
@@ -301,9 +298,7 @@ def _download_text(url):
         if status != 200:
 
             raise RuntimeError(
-                "HTTP status {}".format(
-                    status
-                )
+                f"HTTP status {status}"
             )
 
         text = response.text
@@ -323,7 +318,7 @@ def _download_text(url):
             try:
                 response.close()
 
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
         gc.collect()
@@ -418,7 +413,7 @@ def validate_python(source):
 
         return True, None
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         return False, error
 
@@ -459,9 +454,7 @@ def download_candidate(log=print):
         remote_version = available_version()
 
         log(
-            "Remote version: {}".format(
-                remote_version
-            )
+            f"Remote version: {remote_version}"
         )
 
         log(
@@ -489,9 +482,7 @@ def download_candidate(log=print):
         if not valid:
 
             raise RuntimeError(
-                "Downloaded chair_logic.py failed syntax check: {}".format(
-                    error
-                )
+                f"Downloaded chair_logic.py failed syntax check: {error}"
             )
 
         log(
@@ -623,17 +614,13 @@ def update(log=print):
         )
 
     log(
-        "Installed version: {}".format(
-            local_version
-        )
+        f"Installed version: {local_version}"
     )
 
     remote_version = available_version()
 
     log(
-        "GitHub version: {}".format(
-            remote_version
-        )
+        f"GitHub version: {remote_version}"
     )
 
     comparison = compare_versions(
@@ -714,9 +701,7 @@ def update(log=print):
         )
 
         log(
-            "Installed version: {}".format(
-                installed_version
-            )
+            f"Installed version: {installed_version}"
         )
 
     except Exception as install_error:
@@ -745,16 +730,13 @@ def update(log=print):
                 "Previous version restored."
             )
 
-        except Exception as restore_error:
+        except Exception as restore_error:  # noqa: BLE001
 
             raise RuntimeError(
-                "Update failed: {} ; automatic restore also failed: {}".format(
-                    install_error,
-                    restore_error
-                )
+                f"Update failed: {install_error} ; automatic restore also failed: {restore_error}"
             )
 
-        raise install_error
+        raise install_error  # noqa: TRY201
 
     finally:
 
@@ -810,9 +792,7 @@ def rollback(log=print):
     if not valid:
 
         raise RuntimeError(
-            "Backup chair logic failed syntax check: {}".format(
-                error
-            )
+            f"Backup chair logic failed syntax check: {error}"
         )
 
     backup_version = _read_text_file(
@@ -840,9 +820,7 @@ def rollback(log=print):
     )
 
     log(
-        "Restored version: {}".format(
-            backup_version
-        )
+        f"Restored version: {backup_version}"
     )
 
     return True
@@ -897,9 +875,7 @@ def self_test():
         return
 
     print(
-        "OK: Installed version: {}".format(
-            local_version
-        )
+        f"OK: Installed version: {local_version}"
     )
 
     # --------------------------------------------------------
@@ -941,17 +917,13 @@ def self_test():
     if wifi_manager.current_ssid() is not None:
 
         print(
-            "SSID: {}".format(
-                wifi_manager.current_ssid()
-            )
+            f"SSID: {wifi_manager.current_ssid()}"
         )
 
     if wifi_manager.ip_address() is not None:
 
         print(
-            "IP: {}".format(
-                wifi_manager.ip_address()
-            )
+            f"IP: {wifi_manager.ip_address()}"
         )
 
     # --------------------------------------------------------
@@ -965,20 +937,16 @@ def self_test():
 
         remote_version = available_version()
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         print(
-            "FAILED: {}".format(
-                error
-            )
+            f"FAILED: {error}"
         )
 
         return
 
     print(
-        "OK: GitHub version: {}".format(
-            remote_version
-        )
+        f"OK: GitHub version: {remote_version}"
     )
 
     # --------------------------------------------------------
@@ -1038,18 +1006,14 @@ def self_test():
 
         print()
         print(
-            "OK: Candidate version {} downloaded and validated.".format(
-                downloaded_version
-            )
+            f"OK: Candidate version {downloaded_version} downloaded and validated."
         )
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         print()
         print(
-            "FAILED: {}".format(
-                error
-            )
+            f"FAILED: {error}"
         )
 
         return

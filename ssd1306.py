@@ -12,10 +12,10 @@ Features:
 - Compatible with existing supervisor code
 """
 
-from micropython import const
 from time import sleep_ms
-import framebuf
 
+import framebuf
+from micropython import const
 
 # ============================================================
 # SSD1306 COMMANDS
@@ -349,6 +349,12 @@ class SSD1306:
             y,
             key
         )
+
+    def write_cmd(self, SET_PRECHARGE):
+        ...
+
+    def show(self):
+        ...
 
 
 # ============================================================

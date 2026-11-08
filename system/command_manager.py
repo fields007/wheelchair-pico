@@ -191,9 +191,7 @@ def receive(command_text, log=print):
     if parsed is None:
 
         log(
-            "Unknown or invalid command: {}".format(
-                command_text
-            )
+            f"Unknown or invalid command: {command_text}"
         )
 
         return False
@@ -375,9 +373,7 @@ def _test_parse(
     if result is None:
 
         print(
-            "FAILED: {!r} was rejected.".format(
-                text
-            )
+            f"FAILED: {text!r} was rejected."
         )
 
         return False
@@ -385,43 +381,31 @@ def _test_parse(
     if result.get("command") != expected_command:
 
         print(
-            "FAILED: {!r} parsed as {!r}.".format(
-                text,
-                result
-            )
+            f"FAILED: {text!r} parsed as {result!r}."
         )
 
         return False
 
-    if expected_ssid is not None:
+    if expected_ssid is not None and result.get("ssid") != expected_ssid:
 
-        if result.get("ssid") != expected_ssid:
+        print(
+            f"FAILED: SSID parsing for {text!r}."
+        )
 
-            print(
-                "FAILED: SSID parsing for {!r}.".format(
-                    text
-                )
-            )
+        return False
 
-            return False
-
-    if expected_password is not None:
+    if expected_password is not None:  # noqa: SIM102
 
         if result.get("password") != expected_password:
 
             print(
-                "FAILED: Password parsing for {!r}.".format(
-                    text
-                )
+                f"FAILED: Password parsing for {text!r}."
             )
 
             return False
 
     print(
-        "OK: {!r} -> {}".format(
-            text,
-            describe(result)
-        )
+        f"OK: {text!r} -> {describe(result)}"
     )
 
     return True
@@ -441,17 +425,13 @@ def _test_invalid(text):
     if result is not None:
 
         print(
-            "FAILED: {!r} should have been rejected.".format(
-                text
-            )
+            f"FAILED: {text!r} should have been rejected."
         )
 
         return False
 
     print(
-        "OK: {!r} correctly rejected.".format(
-            text
-        )
+        f"OK: {text!r} correctly rejected."
     )
 
     return True
@@ -630,7 +610,7 @@ def self_test():
 
         passed = False
 
-    elif pending_command().get(
+    elif pending_command().get( # type: ignore
         "command"
     ) != COMMAND_STATUS:
 
@@ -668,7 +648,7 @@ def self_test():
 
         passed = False
 
-    elif pending_command().get(
+    elif pending_command().get( # type: ignore
         "command"
     ) != COMMAND_STATUS:
 
@@ -753,9 +733,7 @@ def self_test():
         ):
 
             print(
-                "FAILED: {} should require chair stop.".format(
-                    command_name
-                )
+                f"FAILED: {command_name} should require chair stop."
             )
 
             passed = False
@@ -763,9 +741,7 @@ def self_test():
         else:
 
             print(
-                "OK: {} requires chair stop.".format(
-                    command_name
-                )
+                f"OK: {command_name} requires chair stop."
             )
 
     for command_name in non_stop_commands:
@@ -779,9 +755,7 @@ def self_test():
         ):
 
             print(
-                "FAILED: {} should not require chair stop.".format(
-                    command_name
-                )
+                f"FAILED: {command_name} should not require chair stop."
             )
 
             passed = False
@@ -789,9 +763,7 @@ def self_test():
         else:
 
             print(
-                "OK: {} does not require chair stop.".format(
-                    command_name
-                )
+                f"OK: {command_name} does not require chair stop."
             )
 
     # --------------------------------------------------------

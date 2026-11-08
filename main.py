@@ -36,7 +36,7 @@ Main messages use the standard 8x8 font.
 
 Secondary messages use a smaller 3x5 bitmap font.
 
-Text is centered horizontally and vertically.
+Text is centred horizontally and vertically.
 
 Long messages wrap automatically.
 
@@ -75,18 +75,14 @@ Network connection operations are blocking and must only
 run while chair outputs are stopped.
 """
 
-from machine import Pin, I2C
-from time import sleep_ms, ticks_ms, ticks_diff
+import os
+import sys
+from time import sleep_ms, ticks_diff, ticks_ms
 
 import machine
-import sys
-import os
+from machine import I2C, Pin
 
-import system.wifi_manager as wifi_manager
-import system.mqtt_manager as mqtt_manager
-import system.command_manager as command_manager
-import system.updater as updater
-
+from system import command_manager, mqtt_manager, updater, wifi_manager
 
 # ============================================================
 # SETTINGS
@@ -277,7 +273,7 @@ def initialize_oled():
 
         return True
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         print(
             "OLED initialization failed:",
@@ -360,7 +356,7 @@ def wrap_oled_text(text):
 def oled_centered_text(text, y):
 
     """
-    Draw standard 8x8 text centered horizontally.
+    Draw standard 8x8 text centred horizontally.
     """
 
     if oled is None:
@@ -747,7 +743,7 @@ def display_status(status, detail="", extra=""):
 
         oled.show()
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         print(
             "OLED update failed:",
@@ -794,7 +790,7 @@ def start_log():
 
             file.write("BOOT\n")
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         print(
             "Could not open log:",
@@ -811,8 +807,8 @@ def write_event_to_file(message):
             file.write(str(message))
             file.write("\n")
 
-    except Exception:
-        pass
+    except Exception as error:  # noqa: BLE001
+        print("Could not write log event:", error)
 
 
 def local_event_log(message=""):
@@ -916,12 +912,10 @@ def request_reconnect_after_reboot(reason):
 
         return True
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         local_event_log(
-            "Could not create reconnect flag: {}".format(
-                error
-            )
+            f"Could not create reconnect flag: {error}"
         )
 
         return False
@@ -941,12 +935,10 @@ def take_reconnect_after_reboot():
 
         os.remove(RECONNECT_FILE)
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         local_event_log(
-            "Could not remove reconnect flag: {}".format(
-                error
-            )
+            f"Could not remove reconnect flag: {error}"
         )
 
         return None
@@ -1036,7 +1028,7 @@ def flush_one_mqtt_message():
                 pending_events.pop(0)
                 return True
 
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
 
         return False
@@ -1057,7 +1049,7 @@ def flush_one_mqtt_message():
 
                 return True
 
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
 
     return False
@@ -1076,7 +1068,7 @@ def send_remote_now(message):
     try:
         return mqtt_manager.send_log(message)
 
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -1104,7 +1096,7 @@ def service_mqtt_if_due():
     try:
         mqtt_manager.check_messages()
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         # Avoid repeatedly writing failures to flash.
         print(
@@ -1130,10 +1122,7 @@ def supervisor_service():
 
     command = command_manager.pending_command()
 
-    if command is None:
-        return False
-
-    return True
+    return command is not None
 
 
 # ============================================================
@@ -1145,7 +1134,7 @@ def wifi_is_connected():
     try:
         return bool(wifi_manager.is_connected())
 
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -1154,7 +1143,7 @@ def mqtt_is_connected():
     try:
         return bool(mqtt_manager.is_connected())
 
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -1181,7 +1170,7 @@ def get_connected_ssid():
 
         return str(ssid)
 
-    except Exception:
+    except Exception:  # noqa: BLE001
         return ""
 
 
@@ -1236,12 +1225,10 @@ def connect_wifi_with_retries():
 
             return True
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         event_log(
-            "Wi-Fi connection error: {}".format(
-                error
-            )
+            f"Wi-Fi connection error: {error}"
         )
 
     event_log(
@@ -1288,12 +1275,10 @@ def connect_mqtt_with_retries():
 
             return True
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         event_log(
-            "MQTT connection error: {}".format(
-                error
-            )
+            f"MQTT connection error: {error}"
         )
 
     event_log(
@@ -1403,11 +1388,11 @@ def report_status():
     try:
         version = updater.current_version()
 
-    except Exception:
+    except Exception:  # noqa: BLE001
         version = "unknown"
 
     event_log(
-        "Version: {}".format(version)
+        f"Version: {version}"
     )
 
     wifi_connected = wifi_is_connected()
@@ -1423,23 +1408,19 @@ def report_status():
         try:
 
             event_log(
-                "SSID: {}".format(
-                    wifi_manager.current_ssid()
-                )
+                f"SSID: {wifi_manager.current_ssid()}"
             )
 
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
 
         try:
 
             event_log(
-                "IP: {}".format(
-                    wifi_manager.ip_address()
-                )
+                f"IP: {wifi_manager.ip_address()}"
             )
 
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
 
     event_log(
@@ -1463,9 +1444,7 @@ def report_status():
     if recovery_error is not None:
 
         event_log(
-            "Recovery reason: {}".format(
-                recovery_error
-            )
+            f"Recovery reason: {recovery_error}"
         )
 
 
@@ -1486,15 +1465,11 @@ def handle_check_update():
         remote_version = result["remote"]
 
         event_log(
-            "Installed version: {}".format(
-                local_version
-            )
+            f"Installed version: {local_version}"
         )
 
         event_log(
-            "GitHub version: {}".format(
-                remote_version
-            )
+            f"GitHub version: {remote_version}"
         )
 
         if result["update_available"]:
@@ -1507,12 +1482,10 @@ def handle_check_update():
                 "No newer update available."
             )
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         event_log(
-            "Update check failed: {}".format(
-                error
-            )
+            f"Update check failed: {error}"
         )
 
 
@@ -1541,18 +1514,13 @@ def handle_add_wifi(command):
         )
 
         event_log(
-            "Saved Wi-Fi network: {}".format(
-                ssid
-            )
+            f"Saved Wi-Fi network: {ssid}"
         )
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         event_log(
-            "Could not save Wi-Fi network '{}': {}".format(
-                ssid,
-                error
-            )
+            f"Could not save Wi-Fi network '{ssid}': {error}"
         )
 
 
@@ -1577,12 +1545,10 @@ def handle_update():
             log=local_event_log
         )
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         event_log(
-            "Update failed: {}".format(
-                error
-            )
+            f"Update failed: {error}"
         )
 
         return
@@ -1604,9 +1570,7 @@ def handle_update():
     )
 
     local_event_log(
-        "Reconnect flag created: {}".format(
-            flag_ok
-        )
+        f"Reconnect flag created: {flag_ok}"
     )
 
     try:
@@ -1615,17 +1579,13 @@ def handle_update():
             flag_contents = file.read().strip()
 
         local_event_log(
-            "Reconnect flag contains: {}".format(
-                flag_contents
-            )
+            f"Reconnect flag contains: {flag_contents}"
         )
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         local_event_log(
-            "Could not verify reconnect flag: {}".format(
-                error
-            )
+            f"Could not verify reconnect flag: {error}"
         )
 
     display_status(
@@ -1663,12 +1623,10 @@ def handle_rollback():
             log=local_event_log
         )
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         event_log(
-            "Rollback failed: {}".format(
-                error
-            )
+            f"Rollback failed: {error}"
         )
 
         return
@@ -1751,17 +1709,13 @@ def process_pending_command():
     ):
 
         local_event_log(
-            "Processing command: {}".format(
-                command_manager.describe(command)
-            )
+            f"Processing command: {command_manager.describe(command)}"
         )
 
     else:
 
         event_log(
-            "Processing command: {}".format(
-                command_manager.describe(command)
-            )
+            f"Processing command: {command_manager.describe(command)}"
         )
 
     if command_name == command_manager.COMMAND_STATUS:
@@ -1829,16 +1783,14 @@ def load_chair_logic():
 
         return True
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         chair_logic = None
 
         recovery_mode = True
 
         recovery_error = (
-            "chair_logic import failed: {}".format(
-                error
-            )
+            f"chair_logic import failed: {error}"
         )
 
         event_log(recovery_error)
@@ -1864,12 +1816,10 @@ def stop_chair_outputs():
 
         chair_logic.stop_outputs()
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         event_log(
-            "Could not call chair stop_outputs(): {}".format(
-                error
-            )
+            f"Could not call chair stop_outputs(): {error}"
         )
 
 
@@ -1888,13 +1838,11 @@ def report_post_reboot_success(reason):
         try:
             version = updater.current_version()
 
-        except Exception:
+        except Exception:  # noqa: BLE001
             version = "unknown"
 
         send_remote_now(
-            "Installed version: {}".format(
-                version
-            )
+            f"Installed version: {version}"
         )
 
     elif reason == "rollback":
@@ -1906,13 +1854,11 @@ def report_post_reboot_success(reason):
         try:
             version = updater.current_version()
 
-        except Exception:
+        except Exception:  # noqa: BLE001
             version = "unknown"
 
         send_remote_now(
-            "Installed version: {}".format(
-                version
-            )
+            f"Installed version: {version}"
         )
 
     elif reason == "reboot":
@@ -1926,9 +1872,7 @@ def automatic_reconnect(reason):
 
     local_event_log("")
     local_event_log(
-        "Automatic network reconnect requested after {}.".format(
-            reason
-        )
+        f"Automatic network reconnect requested after {reason}."
     )
 
     connected = connect_network(
@@ -2002,7 +1946,7 @@ def recovery_loop(auto_reconnect_reason=None):
                 try:
                     mqtt_manager.check_messages()
 
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
 
                 flush_one_mqtt_message()
@@ -2036,9 +1980,7 @@ auto_reconnect_reason = (
 )
 
 local_event_log(
-    "Post-reboot reconnect reason: {}".format(
-        auto_reconnect_reason
-    )
+    f"Post-reboot reconnect reason: {auto_reconnect_reason}"
 )
 
 
@@ -2080,7 +2022,7 @@ try:
 
         try:
 
-            chair_logic.run(
+            chair_logic.run( # type: ignore
                 stop_requested=supervisor_service,
                 log=chair_log
             )
@@ -2089,16 +2031,14 @@ try:
 
             raise
 
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
 
             stop_chair_outputs()
 
             recovery_mode = True
 
             recovery_error = (
-                "chair_logic runtime error: {}".format(
-                    error
-                )
+                f"chair_logic runtime error: {error}"
             )
 
             event_log("")
@@ -2202,9 +2142,7 @@ except Exception as error:
 
     local_event_log("")
     local_event_log(
-        "SUPERVISOR ERROR: {}".format(
-            error
-        )
+        f"SUPERVISOR ERROR: {error}"
     )
 
     raise

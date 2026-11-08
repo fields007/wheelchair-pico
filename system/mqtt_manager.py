@@ -20,13 +20,12 @@ When run directly:
     An MQTT self-test is performed.
 """
 
-import ssl
-import machine
 import binascii
-
+import ssl
 from time import sleep_ms
-from umqtt.simple import MQTTClient
 
+import machine
+from umqtt.simple import MQTTClient  # type: ignore
 
 # ============================================================
 # SETTINGS
@@ -76,7 +75,7 @@ def _message_received(topic, message):
 
         command = message.decode()
 
-    except Exception:
+    except Exception:  # noqa: BLE001
 
         return
 
@@ -87,7 +86,7 @@ def _message_received(topic, message):
 
         command_callback(command)
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         # A bad command handler must not crash MQTT processing.
         print(
@@ -178,9 +177,7 @@ def connect(log=print):
         )
 
         log(
-            "Subscribed to {}".format(
-                MQTT_COMMAND_TOPIC.decode()
-            )
+            f"Subscribed to {MQTT_COMMAND_TOPIC.decode()}"
         )
 
         mqtt_client = client
@@ -188,15 +185,13 @@ def connect(log=print):
 
         return True
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
 
         mqtt_client = None
         mqtt_connected = False
 
         log(
-            "MQTT connection failed: {}".format(
-                error
-            )
+            f"MQTT connection failed: {error}"
         )
 
         return False
@@ -221,7 +216,7 @@ def disconnect():
         try:
             mqtt_client.disconnect()
 
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
 
     mqtt_client = None
@@ -268,14 +263,14 @@ def send_log(message):
 
     try:
 
-        mqtt_client.publish(
+        mqtt_client.publish( # type: ignore
             MQTT_LOG_TOPIC,
             str(message).encode()
         )
 
         return True
 
-    except Exception:
+    except Exception:  # noqa: BLE001
 
         mqtt_client = None
         mqtt_connected = False
@@ -307,11 +302,11 @@ def check_messages():
 
     try:
 
-        mqtt_client.check_msg()
+        mqtt_client.check_msg() # type: ignore
 
         return True
 
-    except Exception:
+    except Exception:  # noqa: BLE001
 
         mqtt_client = None
         mqtt_connected = False
@@ -366,20 +361,16 @@ def self_test():
         # differs.
         import wifi_manager
 
-    if not wifi_manager.is_connected():
+    if not wifi_manager.is_connected() and not wifi_manager.connect():
 
-        if not wifi_manager.connect():
-
-            print()
-            print("FAILED: Wi-Fi connection failed.")
-            return
+        print()
+        print("FAILED: Wi-Fi connection failed.")
+        return
 
     print()
     print("OK: Wi-Fi connected.")
     print(
-        "IP: {}".format(
-            wifi_manager.ip_address()
-        )
+        f"IP: {wifi_manager.ip_address()}"
     )
 
     # --------------------------------------------------------
