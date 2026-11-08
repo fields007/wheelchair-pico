@@ -289,9 +289,10 @@ def read_mode():
         current_mode = 'ROAD'
     return current_mode
 
-def read_speed():
+def read_speed(pins=None):
     global current_speed
-    pins = (speed_gp2.value(), speed_gp19.value())
+    if pins is None:
+        pins = (speed_gp2.value(), speed_gp19.value())
     if pins == (1, 0):
         current_speed = 'LOW'
     elif pins == (1, 1):
@@ -1050,7 +1051,7 @@ def run(stop_requested=None, log=print):
     last_display_ms = ticks_ms() - DISPLAY_INTERVAL_MS
     last_log_ms = ticks_ms()
     previous_mode = None
-    previous_speed = None
+    previous_speed_pins = None
     state = DisplayState()
     _display_last_mode = None
     _display_last_speed = None
@@ -1089,7 +1090,8 @@ def run(stop_requested=None, log=print):
             x_percent = get_x_percentage(x)
             y_percent = get_y_percentage(y)
             mode = read_mode()
-            speed = read_speed()
+            speed_pins = (speed_gp2.value(), speed_gp19.value())
+            speed = read_speed(speed_pins)
             direction = get_direction(y_percent)
             joystick_neutral = (direction == 'NEUTRAL')
 
@@ -1229,9 +1231,9 @@ def run(stop_requested=None, log=print):
             if mode != previous_mode:
                 log(f'Mode: {mode}')
                 previous_mode = mode
-            if speed != previous_speed:
-                log(f'Speed setting: {speed}')
-                previous_speed = speed
+            if speed_pins != previous_speed_pins:
+                log(f'Speed pins (GP2, GP19): {speed_pins}')
+                previous_speed_pins = speed_pins
 
             now = ticks_ms()
             if ticks_diff(now, last_display_ms) >= DISPLAY_INTERVAL_MS:
@@ -1241,17 +1243,16 @@ def run(stop_requested=None, log=print):
 
             if ticks_diff(now, last_log_ms) >= DIAGNOSTIC_INTERVAL_MS:
                 log(
-                    'Mode:{} Speed:{} | v={:.2f}km/h | pitch={} | '
-                    'brake:{} | direction:{} | state:{} | drive gear:{}'.format(
+                    'Mode:{} | Speed pins (GP2, GP19): {} | v={:.2f}km/h | pitch={} | '
+                    'brake:{} | direction:{} | state:{}'.format(
                         mode,
-                        speed,
+                        speed_pins,
                         SPEED_KMH,
                         f'{get_pitch_degrees():+.1f}'
                         if imu_is_healthy() else 'N/A',
                         'ON' if brakes_on else 'OFF',
                         selected_direction,
-                        direction_state,
-                        drive_speed
+                        direction_state
                     )
                 )
                 last_log_ms = now
