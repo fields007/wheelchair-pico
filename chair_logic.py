@@ -39,32 +39,33 @@ IMU_I2C_ADDRESS = 0x68
 OLED_I2C_ADDRESS = 0x3C
 
 # ============================================================
-# 2. IMU LOGIC -- working level calibration + smoothing
+# 2. IMU LOGIC -- gyro tracking + stationary gravity correction
 # ============================================================
 # Calibrate only when the wheelchair is LEVEL and STILL.
-# This is a DISPLAY estimate, not a safety-rated tilt measurement.
-# The 8.5..11.1 m/s2 rejection is suitable for stationary testing,
-# NOT for motion safety decisions.
+# Track rotation with the gyro while driving. Use gravity to correct drift
+# only after the chair stops. This is not a safety-rated tilt measurement.
 from math import atan2, pi, sqrt
 
 G = 9.80665
 ACC_SCALE = G / 16384.0
-IMU_FILTER_ALPHA = 0.06
+GYRO_SCALE = pi / (180.0 * 131.0)  # rad/s per LSB at +/-250 deg/s
+IMU_REST_CORRECTION = 0.06
 IMU_ZERO_ANGLE_DEG = 0.25
 IMU_CAL_SAMPLES = 80
 IMU_CAL_MAX_ATTEMPTS = 600
 IMU_MIN_G = 8.5
 IMU_MAX_G = 11.1
-IMU_SAMPLE_INTERVAL_MS = 100
-IMU_RETRY_INTERVAL_MS = 2000
+IMU_SAMPLE_INTERVAL_MS = 20
+IMU_MAX_GAP_MS = 100
 
 _imu_i2c = None
 _imu_basis = None
 _imu_filtered = None
+_imu_gyro_bias = None
 _imu_pitch_deg = 0.0
 _imu_ok = False
 _imu_last_sample = 0
-_imu_last_retry = 0
+_imu_last_good_sample = None
 _imu_error = None
 
 def signed16(hi, lo):
@@ -107,18 +108,20 @@ def create_basis(reference):
 
 
 def imu_calibrate(stop_requested=None):
-    """Capture 80 good stationary samples; retain calibration on later errors."""
-    global _imu_basis, _imu_filtered
-    sums = [0.0, 0.0, 0.0]
+    """Capture the level reference and gyro bias while stationary."""
+    global _imu_basis, _imu_filtered, _imu_gyro_bias
+    accel_sums = [0.0, 0.0, 0.0]
+    gyro_sums = [0.0, 0.0, 0.0]
     good = 0
     for _ in range(IMU_CAL_MAX_ATTEMPTS):
         if stop_requested is not None and stop_requested():
             return False
         try:
-            a = imu_read_accel()
-            if IMU_MIN_G <= magnitude(a) <= IMU_MAX_G:
+            accel, gyro = imu_read_motion()
+            if IMU_MIN_G <= magnitude(accel) <= IMU_MAX_G:
                 for i in range(3):
-                    sums[i] += a[i]
+                    accel_sums[i] += accel[i]
+                    gyro_sums[i] += gyro[i]
                 good += 1
                 if good >= IMU_CAL_SAMPLES:
                     break
@@ -127,19 +130,22 @@ def imu_calibrate(stop_requested=None):
         sleep_ms(30)
     if good < IMU_CAL_SAMPLES:
         raise RuntimeError(f"Only {good} valid IMU samples")
-    reference = tuple(x / good for x in sums)
-    _imu_basis = create_basis(reference)
-    _imu_filtered = imu_rotate(reference)
+    _imu_basis = create_basis(tuple(accel_sums))
+    _imu_gyro_bias = tuple(value / good for value in gyro_sums)
+    _imu_filtered = (0.0, 0.0, 1.0)
     return True
 
 
-def imu_read_accel():
+def imu_read_motion():
     if _imu_i2c is None:
         raise OSError("IMU I2C is not initialized")
-    raw = _imu_i2c.readfrom_mem(IMU_I2C_ADDRESS, 0x3B, 6)
-    if len(raw) != 6:
+    # One burst contains acceleration, temperature, then angular velocity.
+    raw = _imu_i2c.readfrom_mem(IMU_I2C_ADDRESS, 0x3B, 14)
+    if len(raw) != 14:
         raise OSError("Short IMU read")
-    return tuple(signed16(raw[i], raw[i+1]) * ACC_SCALE for i in (0, 2, 4))
+    accel = tuple(signed16(raw[i], raw[i+1]) * ACC_SCALE for i in (0, 2, 4))
+    gyro = tuple(signed16(raw[i], raw[i+1]) * GYRO_SCALE for i in (8, 10, 12))
+    return accel, gyro
 
 
 def imu_rotate(v):
@@ -147,9 +153,13 @@ def imu_rotate(v):
 
 
 def imu_initialize(i2c, stop_requested=None, log=print):
-    """Run once at startup; no calibration resets during I2C glitches."""
-    global _imu_i2c, _imu_ok, _imu_last_retry, _imu_error
+    """Calibrate on first start and retain the level reference on a restart."""
+    global _imu_i2c, _imu_ok, _imu_error, _imu_filtered
+    global _imu_last_sample, _imu_last_good_sample
     _imu_i2c = i2c
+    _imu_ok = False
+    _imu_filtered = None
+    _imu_last_good_sample = None
     try:
         devices = i2c.scan()
         if IMU_I2C_ADDRESS not in devices:
@@ -157,25 +167,26 @@ def imu_initialize(i2c, stop_requested=None, log=print):
         who = i2c.readfrom_mem(IMU_I2C_ADDRESS, 0x75, 1)[0]
         log(f"IMU WHO_AM_I: 0x{who:02X}")
         imu_configure()
-        if not imu_calibrate(stop_requested):
-            return False
-        _imu_ok = True
+        if _imu_basis is None:
+            if not imu_calibrate(stop_requested):
+                return False
+            _imu_last_good_sample = ticks_ms()
+            _imu_ok = True
+            log("IMU level and gyro calibration successful")
+        _imu_last_sample = ticks_ms()
         _imu_error = None
-        log("IMU level calibration successful")
         return True
     except Exception as exc:  # noqa: BLE001
         _imu_ok = False
         _imu_error = repr(exc)
         log(f"IMU initialization failed: {_imu_error}")
         return False
-    finally:
-        _imu_last_retry = ticks_ms()
 
 
 def imu_configure():
     i2c = _imu_i2c
     if i2c is None:
-        raise OSError("IMU I2sC is not initialized")
+        raise OSError("IMU I2C is not initialized")
     i2c.writeto_mem(IMU_I2C_ADDRESS, 0x6B, b"\x01")
     sleep_ms(100)
     i2c.writeto_mem(IMU_I2C_ADDRESS, 0x1C, b"\x00")
@@ -184,41 +195,59 @@ def imu_configure():
     sleep_ms(100)
 
 
-def imu_update(now):
-    """Call from main loop; return last valid pitch in degrees."""
-    global _imu_filtered, _imu_pitch_deg, _imu_ok
-    global _imu_last_sample, _imu_last_retry, _imu_error
-    if _imu_basis is None:
-        # Never auto-calibrate while the wheelchair might be moving.
+def imu_update(now, drive_idle):
+    """Track the gravity direction with gyro rotation while moving."""
+    global _imu_filtered, _imu_pitch_deg, _imu_ok, _imu_error
+    global _imu_last_sample, _imu_last_good_sample
+    if _imu_basis is None or _imu_gyro_bias is None:
         return _imu_pitch_deg
     if ticks_diff(now, _imu_last_sample) < IMU_SAMPLE_INTERVAL_MS:
         return _imu_pitch_deg
     _imu_last_sample = now
+
+    dt_ms = (ticks_diff(now, _imu_last_good_sample)
+             if _imu_last_good_sample is not None else 0)
+    if dt_ms > IMU_MAX_GAP_MS:
+        _imu_filtered = None
     try:
-        a = imu_read_accel()
-        if not IMU_MIN_G <= magnitude(a) <= IMU_MAX_G:
-            _imu_ok = False
-            _imu_error = "Acceleration magnitude out of range"
-            return _imu_pitch_deg
-        leveled = imu_rotate(a)
-        _imu_filtered = tuple(
-            (1.0 - IMU_FILTER_ALPHA) * _imu_filtered[i] # type: ignore
-            + IMU_FILTER_ALPHA * leveled[i] for i in range(3)
-        )
-        ax, ay, az = _imu_filtered
-        pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0 / pi
-        _imu_pitch_deg = (0.0 if abs(pitch) < IMU_ZERO_ANGLE_DEG else pitch)
-        _imu_ok = True
-        _imu_error = None
+        accel, gyro = imu_read_motion()
     except OSError as exc:
         _imu_ok = False
         _imu_error = repr(exc)
-        if ticks_diff(now, _imu_last_retry) >= IMU_RETRY_INTERVAL_MS:
-            _imu_last_retry = now
-            try:
-                imu_configure()
-            except OSError:
-                pass
+        return _imu_pitch_deg
+    _imu_last_good_sample = now
+
+    gravity = _imu_filtered
+    if gravity is not None:
+        rate = imu_rotate(tuple(gyro[i] - _imu_gyro_bias[i] for i in range(3)))
+        # Gravity rotates opposite the chair in the chair's coordinate frame.
+        change = cross(gravity, rate)
+        gravity = normalize(tuple(gravity[i] + change[i] * dt_ms / 1000.0
+                                  for i in range(3)))
+
+    at_rest = (
+        drive_idle and SPEED_KMH == 0.0
+        and all(ticks_diff(now, edge) >= HALL_STALE_MS for edge in hall_last_edge_ms)
+    )
+    if at_rest and IMU_MIN_G <= magnitude(accel) <= IMU_MAX_G:
+        reference = normalize(imu_rotate(accel))
+        if gravity is None:
+            gravity = reference
+        else:
+            alpha = IMU_REST_CORRECTION
+            gravity = normalize(tuple(gravity[i] + alpha * (reference[i] - gravity[i])
+                                      for i in range(3)))
+
+    _imu_filtered = gravity
+    _imu_ok = gravity is not None
+    if gravity is None:
+        _imu_error = "Waiting for stationary tilt reference"
+        return _imu_pitch_deg
+
+    ax, ay, az = gravity
+    pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0 / pi
+    _imu_pitch_deg = 0.0 if abs(pitch) < IMU_ZERO_ANGLE_DEG else pitch
+    _imu_error = None
     return _imu_pitch_deg
 
 
@@ -320,7 +349,7 @@ STARTUP_SPEED_KMH = 2.0
 STARTUP_MAX_STEP_FRACTION = 0.5
 ROAD_MAX_VOLTAGE = {'LOW': 1.90, 'MEDIUM': 2.20, 'HIGH': 3.30}
 TERRAIN_FRONT_MAX_VOLTAGE = 1.80
-TERRAIN_REAR_MULTIPLIER = {'LOW': 1.00, 'MEDIUM': 1.2, 'HIGH': 1.5}
+TERRAIN_AXLE_MULTIPLIER = {'LOW': 1.00, 'MEDIUM': 1.2, 'HIGH': 1.5}
 THROTTLE_EXPONENT = 2.0
 MIN_VOLTAGE_REGION = 0.05
 
@@ -404,6 +433,18 @@ def set_motor_voltages(front_voltage, rear_voltage):
     for pwm in REAR_MOTOR_PWMS:
         pwm.duty_u16(rear_duty)
 
+# Verify that nose-up reads positive after a level calibration.
+UPHILL_PITCH_SIGN = 1
+
+def get_uphill_gear(mode, speed, direction, uphill_deg):
+    if mode != 'DIFFERENTIAL' or direction != 'FORWARD':
+        return speed
+    if uphill_deg > 17.0:
+        return 'HIGH'
+    if uphill_deg > 10.0 and speed == 'LOW':
+        return 'MEDIUM'
+    return speed
+
 def get_front_max_voltage(mode, speed):
     if mode == 'TERRAIN':
         return TERRAIN_FRONT_MAX_VOLTAGE
@@ -423,14 +464,16 @@ def joystick_to_motor_voltage(y, mode, speed, direction):
                      (1.0 - MIN_VOLTAGE_REGION), 0, 1)
     return MIN_MOTOR_VOLTAGE + fraction**THROTTLE_EXPONENT * (maximum-MIN_MOTOR_VOLTAGE)
 
-def get_rear_voltage(front_voltage, mode, speed):
-    if front_voltage <= 0:
-        return 0.0
+def get_rear_voltage(base_voltage, mode, speed, direction):
     if mode != 'TERRAIN':
-        return front_voltage
-    return min(PICO_PWM_VOLTAGE, front_voltage*TERRAIN_REAR_MULTIPLIER[speed])
+        return base_voltage
+    multiplier = TERRAIN_AXLE_MULTIPLIER[speed]
+    if direction == 'REVERSE':
+        # Reduce the rear command so the front stays stronger at full stick.
+        return max(MIN_MOTOR_VOLTAGE, base_voltage / multiplier)
+    return min(PICO_PWM_VOLTAGE, base_voltage * multiplier)
 
-def update_motor_voltage(target_v, mode, speed, slow_start):
+def update_motor_voltage(target_v, mode, speed, direction, slow_start):
     global motor_current_v, rear_current_v, motor_accel_step_v
 
     # Select acceleration parameters according to speed setting.
@@ -465,9 +508,9 @@ def update_motor_voltage(target_v, mode, speed, slow_start):
         motor_current_v, 0, PICO_PWM_VOLTAGE
     )
 
-    # Rear motors.
+    # Rear axle follows the front command with the TERRAIN bias applied.
     rear_target_v = (
-        get_rear_voltage(motor_current_v, mode, speed)
+        get_rear_voltage(motor_current_v, mode, speed, direction)
         if target_v > 0.0 else 0.0
     )
 
@@ -490,15 +533,11 @@ def update_motor_voltage(target_v, mode, speed, slow_start):
         rear_current_v, 0, PICO_PWM_VOLTAGE
     )
 
-    set_motor_voltages(
-        motor_current_v,
-        rear_current_v
-    )
-
-    return (motor_current_v, rear_current_v)
+    set_motor_voltages(motor_current_v, rear_current_v)
+    return motor_current_v, rear_current_v
 
 # ============================================================
-# 4. STEERING LOGIC -- constant-speed steering
+# 4. STEERING LOGIC -- constant slew, speed-dependent travel
 # ============================================================
 
 servo = PWM(Pin(PIN_STEERING_SERVO))
@@ -510,60 +549,10 @@ SERVO_RIGHT = 1900
 
 SERVO_RELEASE_DELAY_MS = 500
 
-# Steering speed in microseconds of PWM pulse width per second.
-# The larger the value, the faster the steering.
-STEERING_SPEED_US_PER_SEC = {
-    'TERRAIN': {
-        'LOW': 1600,
-        'MEDIUM': 1600,
-        'HIGH': 1600,
-    },
-    'DIFFERENTIAL': {
-        'LOW': 1600,
-        'MEDIUM': 1600,
-        'HIGH': 1600,
-    },
-    'ROAD': {
-        'LOW': 1600,
-        'MEDIUM': 1600,
-        'HIGH': 1600,
-    },
-}
-
-# Speed-dependent steering parameters.
-STEERING_SLOWDOWN_START_KMH = 7.0
-STEERING_SLOWDOWN_END_KMH = 17.0
-
-STEERING_MAX_SPEED = 1600.0
-STEERING_MIN_SPEED = 200.0
-
-
-def get_steering_speed(mode, speed, wheelchair_kmh):
-
-    # TERRAIN, DIFFERENTIAL and ROAD LOW remain unchanged.
-    if mode != 'ROAD' or speed == 'LOW':
-        return STEERING_SPEED_US_PER_SEC[mode][speed]
-
-    # ROAD MEDIUM and HIGH:
-    # Full steering speed below 7 km/h.
-    if wheelchair_kmh <= STEERING_SLOWDOWN_START_KMH:
-        return STEERING_MAX_SPEED
-
-    # Minimum steering speed above 17 km/h.
-    if wheelchair_kmh >= STEERING_SLOWDOWN_END_KMH:
-        return STEERING_MIN_SPEED
-
-    # Linear interpolation between 7 and 17 km/h.
-    fraction = (
-        (wheelchair_kmh - STEERING_SLOWDOWN_START_KMH)
-        /
-        (STEERING_SLOWDOWN_END_KMH - STEERING_SLOWDOWN_START_KMH)
-    )
-
-    return (
-        STEERING_MAX_SPEED
-        + fraction * (STEERING_MIN_SPEED - STEERING_MAX_SPEED)
-    )
+# Servo slew rate in microseconds of pulse width per second.
+STEERING_SPEED_US_PER_SEC = 1600.0
+# Measured speed and fraction of normal full-stick travel in DIFFERENTIAL.
+DIFF_STEERING_TRAVEL = ((7.0, 1.0), (10.0, 0.8), (15.0, 0.7), (20.0, 0.5))
 
 # Steering position updated at 50 Hz.
 # The rest of the control loop remains at approximately 200 Hz.
@@ -613,13 +602,24 @@ def steering_to_pulse(steering_percent):
     )
 
 
-def calculate_steering(x_percent, direction):
-    # No reverse steering inversion.
-    return x_percent
+def calculate_steering(x_percent, mode, wheelchair_kmh):
+    if mode != 'DIFFERENTIAL' or wheelchair_kmh <= DIFF_STEERING_TRAVEL[0][0]:
+        return x_percent
+
+    low_speed, low_travel = DIFF_STEERING_TRAVEL[0]
+    for high_speed, high_travel in DIFF_STEERING_TRAVEL[1:]:
+        if wheelchair_kmh <= high_speed:
+            fraction = (wheelchair_kmh - low_speed) / (high_speed - low_speed)
+            travel = low_travel + fraction * (high_travel - low_travel)
+            break
+        low_speed, low_travel = high_speed, high_travel
+    else:
+        travel = low_travel
+
+    return x_percent * travel
 
 
-def update_servo(target_us, mode, speed, joystick_x,
-                 elapsed_ms=LOOP_PERIOD_MS):
+def update_servo(target_us, joystick_x):
 
     global servo_current_us
     global servo_last_active_ms
@@ -643,15 +643,7 @@ def update_servo(target_us, mode, speed, joystick_x,
 
     servo_last_update_ms = now
 
-    # Steering speed depends on measured wheelchair speed.
-    steering_speed = get_steering_speed(
-        mode,
-        speed,
-        SPEED_KMH
-    )
-
-    # Maximum permitted movement during elapsed time.
-    max_step = steering_speed * dt_ms / 1000.0
+    max_step = STEERING_SPEED_US_PER_SEC * dt_ms / 1000.0
 
     # Difference between target and current steering position.
     difference = target_us - servo_current_us
@@ -1091,16 +1083,14 @@ def run(stop_requested=None, log=print):
             brakes_on = (read_reed_switch() == 0 or handbrake_actuating)
 
             update_wheel_speed(loop_start)
-            imu_update(loop_start)
-
-            steering_percent = calculate_steering(x_percent, direction)
-
-            update_servo(
-                steering_to_pulse(steering_percent),
-                mode,
-                speed,
-                x
+            drive_idle = (
+                joystick_neutral and motor_current_v < MIN_MOTOR_VOLTAGE
+                and rear_current_v < MIN_MOTOR_VOLTAGE
             )
+            imu_update(loop_start, drive_idle)
+
+            steering_percent = calculate_steering(x_percent, mode, SPEED_KMH)
+            update_servo(steering_to_pulse(steering_percent), x)
 
             if brakes_on:
                 reset_motor_ramp()
@@ -1198,17 +1188,22 @@ def run(stop_requested=None, log=print):
 
             rolling = SPEED_KMH > STARTUP_SPEED_KMH
             rolling_neutral = (
-                joystick_neutral and rolling
+                joystick_neutral and rolling and selected_direction == 'FORWARD'
                 and direction_state == 'READY' and not brakes_on
             )
+            drive_speed = speed
             if drive_allowed:
-                target = joystick_to_motor_voltage(y, mode, speed, direction)
+                if imu_is_healthy():
+                    drive_speed = get_uphill_gear(
+                        mode, speed, direction, UPHILL_PITCH_SIGN * get_pitch_degrees()
+                    )
+                target = joystick_to_motor_voltage(y, mode, drive_speed, direction)
                 update_motor_voltage(
-                    target, mode, speed,
+                    target, mode, drive_speed, direction,
                     slow_start=(direction == 'FORWARD' and not rolling),
                 )
             elif rolling_neutral:
-                update_motor_voltage(0.0, mode, speed, slow_start=False)
+                update_motor_voltage(0.0, mode, speed, selected_direction, slow_start=False)
             else:
                 reset_motor_ramp()
 
@@ -1232,7 +1227,7 @@ def run(stop_requested=None, log=print):
             if ticks_diff(now, last_log_ms) >= DIAGNOSTIC_INTERVAL_MS:
                 log(
                     'Mode:{} Speed:{} | v={:.2f}km/h | pitch={} | '
-                    'brake:{} | direction:{} | state:{}'.format(
+                    'brake:{} | direction:{} | state:{} | drive gear:{}'.format(
                         mode,
                         speed,
                         SPEED_KMH,
@@ -1240,7 +1235,8 @@ def run(stop_requested=None, log=print):
                         if imu_is_healthy() else 'N/A',
                         'ON' if brakes_on else 'OFF',
                         selected_direction,
-                        direction_state
+                        direction_state,
+                        drive_speed
                     )
                 )
                 last_log_ms = now
