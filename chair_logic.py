@@ -348,8 +348,8 @@ MIN_MOTOR_VOLTAGE = 1.60
 STARTUP_SPEED_KMH = 2.0
 STARTUP_MAX_STEP_FRACTION = 0.5
 ROAD_MAX_VOLTAGE = {'LOW': 1.90, 'MEDIUM': 2.20, 'HIGH': 3.30}
-TERRAIN_FRONT_MAX_VOLTAGE = 1.80
-TERRAIN_AXLE_MULTIPLIER = {'LOW': 1.00, 'MEDIUM': 1.2, 'HIGH': 1.5}
+AXLE_BIASED_FRONT_MAX_VOLTAGE = 1.80
+AXLE_BIAS_MULTIPLIER = {'LOW': 1.00, 'MEDIUM': 1.2, 'HIGH': 1.5}
 THROTTLE_EXPONENT = 2.0
 MIN_VOLTAGE_REGION = 0.05
 
@@ -373,7 +373,7 @@ MOTOR_RAMP_SETTINGS = {
 
 MOTOR_RAMP_MODE_MULTIPLIER = {
     'TERRAIN': 4.0,
-    'DIFFERENTIAL': 1.0,
+    'DIFFERENTIAL': 4.0,
     'ROAD': 1.0,
 }
 
@@ -446,8 +446,8 @@ def get_uphill_gear(mode, speed, direction, uphill_deg):
     return speed
 
 def get_front_max_voltage(mode, speed):
-    if mode == 'TERRAIN':
-        return TERRAIN_FRONT_MAX_VOLTAGE
+    if mode in ('TERRAIN', 'DIFFERENTIAL'):
+        return AXLE_BIASED_FRONT_MAX_VOLTAGE
     return ROAD_MAX_VOLTAGE[speed]
 
 def joystick_to_motor_voltage(y, mode, speed, direction):
@@ -464,12 +464,12 @@ def joystick_to_motor_voltage(y, mode, speed, direction):
                      (1.0 - MIN_VOLTAGE_REGION), 0, 1)
     return MIN_MOTOR_VOLTAGE + fraction**THROTTLE_EXPONENT * (maximum-MIN_MOTOR_VOLTAGE)
 
-def get_rear_voltage(base_voltage, mode, speed, direction):
-    if mode != 'TERRAIN':
+def get_other_axle_voltage(base_voltage, mode, speed, direction):
+    if mode == 'ROAD':
         return base_voltage
-    multiplier = TERRAIN_AXLE_MULTIPLIER[speed]
+    multiplier = AXLE_BIAS_MULTIPLIER[speed]
     if direction == 'REVERSE':
-        # Reduce the rear command so the front stays stronger at full stick.
+        # Keep the axle following the stick stronger at full reverse.
         return max(MIN_MOTOR_VOLTAGE, base_voltage / multiplier)
     return min(PICO_PWM_VOLTAGE, base_voltage * multiplier)
 
@@ -485,53 +485,68 @@ def update_motor_voltage(target_v, mode, speed, direction, slow_start):
     start_step = ramp['start_step'] * multiplier
     acceleration = ramp['acceleration'] * multiplier
 
+    # Only TERRAIN reverse takes its primary command from the rear axle.
+    rear_is_primary = mode == 'TERRAIN' and direction == 'REVERSE'
+    if rear_is_primary:
+        primary_v, other_v = rear_current_v, motor_current_v
+    else:
+        primary_v, other_v = motor_current_v, rear_current_v
+
     # Start at the lowest command that produces PWM.
-    if target_v > 0.0 and motor_current_v < MIN_MOTOR_VOLTAGE:
-        motor_current_v = MIN_MOTOR_VOLTAGE
+    if target_v > 0.0 and primary_v < MIN_MOTOR_VOLTAGE:
+        primary_v = MIN_MOTOR_VOLTAGE
         motor_accel_step_v = start_step
 
-    elif motor_current_v < target_v:
+    elif primary_v < target_v:
         step = max_step
         if slow_start:
             startup_limit = max_step * STARTUP_MAX_STEP_FRACTION
             step = min(motor_accel_step_v, startup_limit)
             motor_accel_step_v = min(step + acceleration, startup_limit)
-        motor_current_v += min(step, target_v - motor_current_v)
+        primary_v += min(step, target_v - primary_v)
 
-    elif motor_current_v > target_v:
-        motor_current_v -= min(
+    elif primary_v > target_v:
+        primary_v -= min(
             max_step,
-            motor_current_v - target_v
+            primary_v - target_v
         )
 
-    motor_current_v = clamp(
-        motor_current_v, 0, PICO_PWM_VOLTAGE
+    primary_v = clamp(
+        primary_v, 0, PICO_PWM_VOLTAGE
     )
 
-    # Rear axle follows the front command with the TERRAIN bias applied.
-    rear_target_v = (
-        get_rear_voltage(motor_current_v, mode, speed, direction)
+    # The other axle follows the primary command with the mode's bias.
+    other_target_v = (
+        get_other_axle_voltage(primary_v, mode, speed, direction)
         if target_v > 0.0 else 0.0
     )
 
-    if target_v > 0.0 and rear_current_v < MIN_MOTOR_VOLTAGE:
-        rear_current_v = MIN_MOTOR_VOLTAGE
+    if target_v > 0.0 and other_v < MIN_MOTOR_VOLTAGE:
+        other_v = MIN_MOTOR_VOLTAGE
 
-    elif rear_current_v < rear_target_v:
-        rear_current_v += min(
+    elif other_v < other_target_v:
+        other_v += min(
             max_step,
-            rear_target_v - rear_current_v
+            other_target_v - other_v
         )
 
     else:
-        rear_current_v -= min(
+        other_v -= min(
             max_step,
-            rear_current_v - rear_target_v
+            other_v - other_target_v
         )
 
-    rear_current_v = clamp(
-        rear_current_v, 0, PICO_PWM_VOLTAGE
+    other_v = clamp(
+        other_v, 0, PICO_PWM_VOLTAGE
     )
+
+    if rear_is_primary:
+        motor_current_v, rear_current_v = other_v, primary_v
+    else:
+        motor_current_v, rear_current_v = primary_v, other_v
+    if mode == 'TERRAIN':
+        # A mode change must not carry a front bias into TERRAIN.
+        motor_current_v = min(motor_current_v, rear_current_v)
 
     set_motor_voltages(motor_current_v, rear_current_v)
     return motor_current_v, rear_current_v
@@ -551,8 +566,8 @@ SERVO_RELEASE_DELAY_MS = 500
 
 # Servo slew rate in microseconds of pulse width per second.
 STEERING_SPEED_US_PER_SEC = 1600.0
-# Measured speed and fraction of normal full-stick travel in DIFFERENTIAL.
-DIFF_STEERING_TRAVEL = ((7.0, 1.0), (10.0, 0.8), (15.0, 0.7), (20.0, 0.5))
+# Measured speed and fraction of normal steering travel in ROAD.
+ROAD_STEERING_TRAVEL = ((7.0, 1.0), (10.0, 0.8), (15.0, 0.7), (20.0, 0.5))
 
 # Steering position updated at 50 Hz.
 # The rest of the control loop remains at approximately 200 Hz.
@@ -603,11 +618,11 @@ def steering_to_pulse(steering_percent):
 
 
 def calculate_steering(x_percent, mode, wheelchair_kmh):
-    if mode != 'DIFFERENTIAL' or wheelchair_kmh <= DIFF_STEERING_TRAVEL[0][0]:
+    if mode != 'ROAD' or wheelchair_kmh <= ROAD_STEERING_TRAVEL[0][0]:
         return x_percent
 
-    low_speed, low_travel = DIFF_STEERING_TRAVEL[0]
-    for high_speed, high_travel in DIFF_STEERING_TRAVEL[1:]:
+    low_speed, low_travel = ROAD_STEERING_TRAVEL[0]
+    for high_speed, high_travel in ROAD_STEERING_TRAVEL[1:]:
         if wheelchair_kmh <= high_speed:
             fraction = (wheelchair_kmh - low_speed) / (high_speed - low_speed)
             travel = low_travel + fraction * (high_travel - low_travel)
